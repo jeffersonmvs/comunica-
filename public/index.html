@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>COMUNICA+ — Comunicação Operacional Hospitalar</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <!-- Tela de acesso -->
+  <div id="login" class="login-overlay">
+    <div class="login-card">
+      <div class="brand"><span class="radio-dot"></span> COMUNICA<span class="plus">+</span></div>
+      <p class="tagline">Comunicação operacional hospitalar Push-to-Talk</p>
+      <label for="login-name">Nome</label>
+      <input id="login-name" type="text" placeholder="Ex.: Dra. Ana Souza" autocomplete="name" />
+      <label for="login-sector">Setor / Função</label>
+      <select id="login-sector"></select>
+      <button id="login-btn" class="btn-primary">Entrar no rádio</button>
+      <p class="hint">Seu acesso identifica quem fala em cada transmissão (responsabilidade e rastreabilidade).</p>
+    </div>
+  </div>
+
+  <!-- App -->
+  <header class="topbar">
+    <div class="brand small"><span class="radio-dot"></span> COMUNICA<span class="plus">+</span></div>
+    <div class="topbar-right">
+      <span id="online-count" class="pill">0 online</span>
+      <span id="user-chip" class="user-chip"></span>
+      <button id="logout-btn" class="btn-ghost" title="Sair">⎋</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <!-- Coluna esquerda: canais + presença -->
+    <aside class="col col-left">
+      <section class="panel">
+        <h2>📻 Canais</h2>
+        <ul id="channel-list" class="channel-list"></ul>
+      </section>
+      <section class="panel">
+        <h2>Usuários online</h2>
+        <ul id="online-list" class="online-list"></ul>
+      </section>
+    </aside>
+
+    <!-- Coluna central: console PTT + feed -->
+    <section class="col col-center">
+      <section class="panel console">
+        <div class="console-head">
+          <div>
+            <div class="console-channel" id="active-channel-name">Selecione um canal</div>
+            <div class="console-sub" id="active-channel-desc"></div>
+          </div>
+          <div class="priority-picker" id="priority-picker" role="group" aria-label="Prioridade">
+            <button data-priority="rotina" class="prio prio-rotina" title="Rotina">🟢</button>
+            <button data-priority="importante" class="prio prio-importante" title="Importante">🟡</button>
+            <button data-priority="urgente" class="prio prio-urgente" title="Urgente">🟠</button>
+            <button data-priority="emergencia" class="prio prio-emergencia" title="Emergência">🔴</button>
+          </div>
+        </div>
+
+        <div id="talk-banner" class="talk-banner hidden"></div>
+
+        <button id="ptt" class="ptt" disabled>
+          <span class="ptt-icon">🎙️</span>
+          <span class="ptt-label">Segure para falar</span>
+          <span class="ptt-hint">(ou barra de espaço)</span>
+        </button>
+
+        <div class="live-transcript">
+          <span class="live-label">Transcrição ao vivo:</span>
+          <span id="live-transcript-text" class="live-text">—</span>
+        </div>
+
+        <details class="text-fallback">
+          <summary>Sem microfone? Enviar como texto</summary>
+          <div class="text-fallback-body">
+            <input id="text-message" type="text" placeholder="Digite a mensagem que seria falada…" />
+            <button id="text-send" class="btn-primary">Transmitir texto</button>
+          </div>
+        </details>
+      </section>
+
+      <section class="panel">
+        <h2>Últimas transmissões <span id="feed-channel-tag" class="tag"></span></h2>
+        <div id="feed" class="feed"></div>
+      </section>
+    </section>
+
+    <!-- Coluna direita: busca + ocorrências + estatísticas -->
+    <aside class="col col-right">
+      <section class="panel">
+        <h2>🔎 Busca inteligente</h2>
+        <form id="search-form" class="search-form">
+          <input id="search-input" type="search" placeholder='Ex.: "anestesista" ou "quem falou sobre oxigênio?"' />
+          <button class="btn-primary" type="submit">Buscar</button>
+        </form>
+        <div id="search-results" class="search-results"></div>
+      </section>
+
+      <section class="panel">
+        <h2>📒 Livro de Ocorrências <span id="occ-open-count" class="tag tag-warn"></span></h2>
+        <div id="occurrences" class="occurrences"></div>
+      </section>
+
+      <section class="panel">
+        <h2>📊 Painel do dia</h2>
+        <div id="stats" class="stats"></div>
+      </section>
+    </aside>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Cliente Socket.IO servido pelo próprio backend (sem CDN externo) -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
