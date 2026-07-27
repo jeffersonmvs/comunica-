@@ -67,18 +67,32 @@ PostgreSQL.
 2. O `PttGateway` verifica ocupação do canal. **Emergência 🔴 pode interromper**
    uma transmissão de prioridade menor (modela a prioridade de rádio
    profissional); caso contrário, retorna `ptt_denied`.
-3. Enquanto fala: `MediaRecorder` grava o áudio e a `Web Speech API` gera a
-   transcrição ao vivo. `ptt_started` é difundido (painel mostra "no ar").
-4. Usuário **solta o botão** → cliente envia `ptt_end` com áudio (base64) +
-   transcrição.
+3. `ptt_started` é difundido (com `speakerSocketId`). O falante abre o microfone
+   **uma vez** e usa o mesmo `MediaStream` para dois destinos em paralelo:
+   - **WebRTC (voz ao vivo)** — cada ouvinte do canal, ao receber `ptt_started`,
+     emite `webrtc_join`; o falante cria um `RTCPeerConnection` por ouvinte,
+     adiciona a faixa de áudio e negocia offer/answer/ICE (relay pelo gateway).
+     A mídia trafega **direto entre navegadores** (< 300 ms).
+   - **`MediaRecorder`** grava o clipe; a `Web Speech API` gera a transcrição.
+4. Usuário **solta o botão** → fecha os pares WebRTC e envia `ptt_end` com o
+   áudio gravado (base64) + transcrição.
 5. `TransmissionsService.create` executa o pipeline:
    - `AiService.analyze()` → normaliza transcrição, extrai palavras-chave,
      **classifica prioridade**, **gera resumo** e **detecta ocorrência**;
    - grava o áudio em `AUDIO_DIR`;
    - persiste a transmissão e **indexa no FTS5**;
    - se for intercorrência, **cria automaticamente uma ocorrência**.
-6. `transmission_created` é difundido: o painel atualiza e os ouvintes do canal
-   **reproduzem o áudio** automaticamente.
+6. `transmission_created` é difundido: o painel e o histórico atualizam. A voz
+   já foi ouvida **ao vivo**; o clipe gravado fica disponível para reprodução.
+
+### Sinalização WebRTC (malha P2P)
+
+O `PttGateway` atua apenas como **signaling server**: encaminha `webrtc_join`,
+`webrtc_offer`, `webrtc_answer` e `webrtc_ice` entre pares (cada evento leva um
+`to` = socket destino; o gateway reenvia anexando `from` = socket remetente).
+Não há mídia passando pelo servidor. STUN público é usado para candidatos ICE;
+em `localhost`/LAN, candidatos host bastam. A malha atende grupos pequenos —
+para dezenas de ouvintes por canal, evoluir para um **SFU** (ver roadmap).
 
 ## Camada de IA (ponto de extensão)
 
@@ -112,7 +126,7 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
 | --- | --- | --- |
 | App | Web app (HTML/JS) | Flutter |
 | Backend | NestJS | NestJS ou Go |
-| PTT / mídia | clipe via WebSocket + auto-play | WebRTC (streaming, < 300 ms) |
+| PTT / voz ao vivo | **WebRTC malha P2P** (< 300 ms) + gravação do clipe | WebRTC via **SFU** (escala) |
 | Mensageria | eventos Socket.IO | NATS ou MQTT |
 | Banco principal | SQLite | PostgreSQL |
 | Cache/presença | memória do processo | Redis |
@@ -124,9 +138,11 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
 
 ## Roadmap
 
+- [x] **Streaming de voz em tempo real com WebRTC (latência < 300 ms)** — malha P2P.
+- [ ] Evoluir a voz ao vivo de malha P2P para um **SFU** (ex.: mediasoup) para
+      suportar dezenas de ouvintes por canal.
 - [ ] Substituir stub de transcrição por Whisper com diarização de locutores.
 - [ ] Resumo/classificação/pesquisa semântica via LLM + banco vetorial.
-- [ ] Streaming de voz em tempo real com WebRTC (latência < 300 ms).
 - [ ] Presença e arbitragem de canal em Redis (escala horizontal).
 - [ ] Migrar persistência para PostgreSQL e áudio para storage S3.
 - [ ] Autenticação/autorização (papéis) e criptografia ponta a ponta.
@@ -139,7 +155,11 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
   adequado para demonstração, não para produção multi-instância.
 - **Presença em memória:** reinícios limpam a presença; o registro histórico
   (transmissões/ocorrências) é persistido e preservado.
-- **Áudio trafega em base64 no `ptt_end`** (limite de 25 MB no corpo). No
-  produto, o transporte é WebRTC com streaming contínuo.
+- **Voz ao vivo em malha P2P:** cada falante mantém uma conexão por ouvinte —
+  ótimo para grupos pequenos; dezenas de ouvintes por canal pedem um SFU.
+- **A gravação (registro permanente) trafega em base64 no `ptt_end`** (limite de
+  25 MB no corpo) — separada do caminho ao vivo. No produto, a própria captura
+  do SFU pode alimentar a gravação.
+- **WebRTC exige contexto seguro:** funciona em `localhost` (demo) ou HTTPS.
 - **Sem autenticação forte:** a identificação é por nome+setor, suficiente para
   o MVP; produção exige IdP e RBAC.

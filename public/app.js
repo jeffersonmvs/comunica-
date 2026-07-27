@@ -20,6 +20,15 @@
     liveTranscript: '',
     startedAt: null,
     activeSpeakers: {}, // channelId -> speaker
+    // WebRTC (voz ao vivo)
+    socketId: null,
+    localStream: null, // MediaStream do microfone durante a fala
+    isSpeaker: false,
+    peers: {}, // socketId remoto -> RTCPeerConnection
+  };
+
+  const RTC_CONFIG = {
+    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
   };
 
   const $ = (sel) => document.querySelector(sel);
@@ -258,6 +267,7 @@
     }
 
     state.transmitting = true;
+    state.isSpeaker = true;
     state.liveTranscript = '';
     state.startedAt = ack.startedAt || new Date().toISOString();
     $('#live-transcript-text').textContent = '—';
@@ -265,16 +275,26 @@
     ptt.classList.add('transmitting');
     ptt.querySelector('.ptt-label').textContent = 'Transmitindo…';
 
-    // Captura de áudio (opcional — degrada se não houver microfone).
+    // Captura de áudio: o MESMO stream alimenta o WebRTC (voz ao vivo) e o
+    // MediaRecorder (gravação para o registro permanente).
     state.chunks = [];
+    state.localStream = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      state.localStream = stream;
+      // Conecta ouvintes que já anunciaram interesse (podem ter chegado antes do stream).
+      (state._pendingJoins || []).forEach((id) => speakerConnectTo(id));
+      state._pendingJoins = [];
       const mime = pickMime();
-      state.mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
-      state.mediaRecorder.ondataavailable = (e) => { if (e.data.size) state.chunks.push(e.data); };
-      state.mediaRecorder.start();
+      try {
+        state.mediaRecorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+        state.mediaRecorder.ondataavailable = (e) => { if (e.data.size) state.chunks.push(e.data); };
+        state.mediaRecorder.start();
+      } catch {
+        state.mediaRecorder = null; // sem gravação; a voz ao vivo ainda funciona
+      }
     } catch {
-      state.mediaRecorder = null; // sem áudio; segue só com transcrição/texto
+      state.mediaRecorder = null; // sem microfone; segue só com transcrição/texto
     }
     state.recognition = startRecognition();
   }
@@ -282,9 +302,14 @@
   async function stopTransmit(cancel) {
     if (!state.transmitting) return;
     state.transmitting = false;
+    state.isSpeaker = false;
     const ptt = $('#ptt');
     ptt.classList.remove('transmitting');
     ptt.querySelector('.ptt-label').textContent = 'Segure para falar';
+
+    // Encerra a voz ao vivo: fecha os pares (ouvintes também fecham em ptt_ended).
+    closeAllPeers();
+    state._pendingJoins = [];
 
     if (state.recognition) { try { state.recognition.stop(); } catch {} state.recognition = null; }
 
@@ -312,14 +337,22 @@
     if (state.mediaRecorder && state.mediaRecorder.state !== 'inactive') {
       const mr = state.mediaRecorder;
       mr.onstop = async () => {
-        mr.stream.getTracks().forEach((t) => t.stop());
+        stopLocalMedia();
         const blob = new Blob(state.chunks, { type: mr.mimeType || 'audio/webm' });
         const base64 = await blobToBase64(blob);
         finalize(base64, mr.mimeType || 'audio/webm');
       };
       mr.stop();
     } else {
+      stopLocalMedia();
       finalize(undefined, undefined);
+    }
+  }
+
+  function stopLocalMedia() {
+    if (state.localStream) {
+      state.localStream.getTracks().forEach((t) => t.stop());
+      state.localStream = null;
     }
   }
 
@@ -378,12 +411,90 @@
   }
 
   // ----------------------------------------------------------------------- //
+  // WebRTC — voz ao vivo (malha P2P, sinalização via Socket.IO)
+  // ----------------------------------------------------------------------- //
+  function newPeer(remoteId) {
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    pc.onicecandidate = (e) => {
+      if (e.candidate) state.socket.emit('webrtc_ice', { to: remoteId, candidate: e.candidate });
+    };
+    pc.onconnectionstatechange = () => {
+      if (['failed', 'closed', 'disconnected'].includes(pc.connectionState)) closePeer(remoteId);
+    };
+    state.peers[remoteId] = pc;
+    return pc;
+  }
+
+  function closePeer(remoteId) {
+    const pc = state.peers[remoteId];
+    if (pc) { try { pc.close(); } catch {} delete state.peers[remoteId]; }
+    const el = document.getElementById('rtc-audio-' + remoteId);
+    if (el) el.remove();
+    updateLiveBadge();
+  }
+
+  function closeAllPeers() {
+    Object.keys(state.peers).forEach(closePeer);
+  }
+
+  // Falante: ao receber o "join" de um ouvinte, cria a conexão e envia a oferta.
+  async function speakerConnectTo(remoteId) {
+    if (!state.localStream || state.peers[remoteId]) return;
+    const pc = newPeer(remoteId);
+    state.localStream.getTracks().forEach((t) => pc.addTrack(t, state.localStream));
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    state.socket.emit('webrtc_offer', { to: remoteId, sdp: pc.localDescription });
+  }
+
+  // Ouvinte: ao receber a oferta do falante, responde e toca o áudio ao vivo.
+  async function listenerHandleOffer(fromId, sdp) {
+    const pc = newPeer(fromId);
+    pc.ontrack = (e) => playRemoteStream(fromId, e.streams[0]);
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    state.socket.emit('webrtc_answer', { to: fromId, sdp: pc.localDescription });
+  }
+
+  async function handleAnswer(fromId, sdp) {
+    const pc = state.peers[fromId];
+    if (pc) await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  }
+
+  async function handleIce(fromId, candidate) {
+    const pc = state.peers[fromId];
+    if (pc && candidate) { try { await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {} }
+  }
+
+  function playRemoteStream(fromId, stream) {
+    let el = document.getElementById('rtc-audio-' + fromId);
+    if (!el) {
+      el = document.createElement('audio');
+      el.id = 'rtc-audio-' + fromId;
+      el.autoplay = true;
+      document.body.appendChild(el);
+    }
+    el.srcObject = stream;
+    el.play().catch(() => {});
+    updateLiveBadge();
+  }
+
+  function updateLiveBadge() {
+    const badge = $('#live-badge');
+    if (!badge) return;
+    const playing = Object.keys(state.peers).some((id) => document.getElementById('rtc-audio-' + id));
+    badge.classList.toggle('hidden', !(playing && !state.isSpeaker));
+  }
+
+  // ----------------------------------------------------------------------- //
   // Socket.IO — tempo real
   // ----------------------------------------------------------------------- //
   function connectSocket() {
     const socket = io();
     state.socket = socket;
     socket.on('connect', () => {
+      state.socketId = socket.id;
       socket.emit('identify', { userId: state.user.id }, () => {
         if (state.activeChannel) socket.emit('join_channel', { channelId: state.activeChannel.id });
       });
@@ -391,13 +502,28 @@
 
     socket.on('presence', (data) => renderPresence(data));
 
+    // --- Sinalização WebRTC (voz ao vivo) --------------------------------- //
+    // Ouvinte anunciou-se → falante cria a conexão e envia a oferta.
+    socket.on('webrtc_join', ({ from }) => {
+      if (!state.isSpeaker) return;
+      if (state.localStream) speakerConnectTo(from);
+      else { state._pendingJoins = state._pendingJoins || []; state._pendingJoins.push(from); }
+    });
+    socket.on('webrtc_offer', ({ from, sdp }) => listenerHandleOffer(from, sdp));
+    socket.on('webrtc_answer', ({ from, sdp }) => handleAnswer(from, sdp));
+    socket.on('webrtc_ice', ({ from, candidate }) => handleIce(from, candidate));
+
     socket.on('ptt_started', (data) => {
       state.activeSpeakers[data.channelId] = data;
       renderChannels();
-      if (state.activeChannel && data.channelId === state.activeChannel.id && data.userId !== state.user.id) {
+      const isMine = data.userId === state.user.id;
+      const sameChannel = state.activeChannel && data.channelId === state.activeChannel.id;
+      if (sameChannel && !isMine) {
         showTalkBanner(data);
+        // Ouvinte do canal ativo pede a voz ao vivo ao falante (WebRTC).
+        if (data.speakerSocketId) socket.emit('webrtc_join', { to: data.speakerSocketId });
       }
-      if (data.priority === 'emergencia' && data.userId !== state.user.id) {
+      if (data.priority === 'emergencia' && !isMine) {
         toast(`🔴 EMERGÊNCIA — ${data.userName} (${data.sectorLabel || ''})`, 'emergencia');
       }
     });
@@ -406,6 +532,8 @@
       delete state.activeSpeakers[data.channelId];
       renderChannels();
       if (state.activeChannel && data.channelId === state.activeChannel.id) hideTalkBanner();
+      // Encerra a voz ao vivo deste canal (fecha os pares e para o áudio).
+      if (!state.isSpeaker) closeAllPeers();
     });
 
     socket.on('ptt_interrupted', () => {
@@ -414,13 +542,10 @@
     });
 
     socket.on('transmission_created', ({ transmission, occurrence }) => {
-      // Atualiza feed/painel; toca o áudio se for do canal ativo e de outra pessoa.
+      // A voz já foi ouvida ao vivo (WebRTC); aqui só atualizamos o registro.
+      // O clipe gravado permanece disponível para reprodução no histórico.
       if (state.activeChannel && transmission.channelId === state.activeChannel.id) {
         loadFeed();
-        if (transmission.userId !== state.user.id && transmission.audioPath) {
-          const audio = new Audio(`/api/transmissions/${transmission.id}/audio`);
-          audio.play().catch(() => {});
-        }
       }
       if (occurrence) refreshOccurrences();
       refreshStats();

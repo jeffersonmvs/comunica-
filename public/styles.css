@@ -188,6 +188,15 @@ button { cursor: pointer; font-family: inherit; }
 }
 .talk-banner::before { content: "📡"; }
 
+.live-badge {
+  background: rgba(41, 196, 107, 0.12);
+  border: 1px solid rgba(41, 196, 107, 0.4);
+  color: #9bf0c0;
+  border-radius: 8px; padding: 6px 12px; margin-bottom: 12px; font-size: 12px;
+  display: inline-flex; align-items: center; gap: 6px;
+  animation: pulse 1.6s infinite;
+}
+
 .ptt {
   width: 100%;
   background: linear-gradient(180deg, #22303f, #17222e);

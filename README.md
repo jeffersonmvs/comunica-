@@ -13,6 +13,7 @@ Este repositório contém um **MVP funcional e executável** da plataforma: um b
 | Recurso do conceito | Status neste MVP |
 | --- | --- |
 | Push-to-Talk com um toque (segurar para falar) | ✅ Web app (pointer + barra de espaço) |
+| **Voz ao vivo em tempo real (< 300 ms)** | ✅ WebRTC (malha P2P, sinalização via Socket.IO) |
 | Comunicação por canais (Diretoria, CC, UTI, …) | ✅ 9 canais padrão |
 | Prioridades 🟢🟡🟠🔴 estilo rádio | ✅ Emergência interrompe transmissão não crítica |
 | Presença em tempo real / "quem está no ar" | ✅ via WebSocket |
@@ -26,19 +27,27 @@ Este repositório contém um **MVP funcional e executável** da plataforma: um b
 | Painel operacional (online, canais, últimas transmissões, ocorrências) | ✅ |
 | Reprodução das transmissões | ✅ |
 
-Itens do conceito ainda **não** implementados neste MVP (ver [roadmap](docs/ARCHITECTURE.md#roadmap)): app Flutter nativo, streaming de mídia via WebRTC, diarização real de locutores, criptografia ponta a ponta, NATS/MQTT, PostgreSQL + banco vetorial, funcionamento em segundo plano/mãos-livres.
+A **voz ao vivo** usa WebRTC em **malha P2P** (cada falante conecta-se diretamente aos ouvintes do canal; o servidor só faz a sinalização). A mídia trafega direto entre navegadores, com latência típica **< 300 ms** — atendendo à meta do conceito. Em paralelo, o áudio é gravado e enviado ao final para o **registro permanente** + IA: *nada é perdido*. Malha P2P atende grupos pequenos; para escala, o próximo passo é um SFU (ex.: mediasoup) — ver [roadmap](docs/ARCHITECTURE.md#roadmap).
+
+Itens do conceito ainda **não** implementados neste MVP (ver [roadmap](docs/ARCHITECTURE.md#roadmap)): app Flutter nativo, SFU para escala, diarização real de locutores, criptografia ponta a ponta, NATS/MQTT, PostgreSQL + banco vetorial, funcionamento em segundo plano/mãos-livres.
+
+> ⚠️ WebRTC/microfone exigem **contexto seguro**: funciona em `http://localhost` (demo) ou sob **HTTPS** em produção. Para ouvir a voz ao vivo, abra duas abas/dispositivos, entre no **mesmo canal** e segure para falar em um deles.
 
 ---
 
 ## Arquitetura do MVP
 
 ```
+Navegador (falante) ◀═══ WebRTC (voz ao vivo, P2P) ═══▶ Navegador (ouvinte)
+        ▲                                                        ▲
+        │ sinalização + REST/WS                                 │
 Navegador (web app)                         Backend NestJS
 ┌───────────────────────────┐   REST/WS    ┌──────────────────────────────┐
 │  Painel Operacional        │◀────────────▶│  Controllers (users/channels/│
-│  Console PTT (MediaRecorder│              │   transmissions/occurrences/ │
-│   + Web Speech API)        │              │   search)                    │
-│  Socket.IO client          │              │  PttGateway (Socket.IO)      │
+│  Console PTT (WebRTC +     │              │   transmissions/occurrences/ │
+│   MediaRecorder + Web      │              │   search)                    │
+│   Speech API)              │              │  PttGateway (Socket.IO +     │
+│  Socket.IO client          │              │   signaling WebRTC)          │
 └───────────────────────────┘              │  AiService (stub → Whisper/  │
                                             │   LLM no futuro)             │
                                             │  DatabaseService (SQLite/FTS5│
@@ -117,6 +126,7 @@ Copie `.env.example` para `.env`. Padrões sensatos já funcionam sem configura�
 
 **WebSocket (Socket.IO):** `identify`, `join_channel`, `ptt_start`, `ptt_end`, `ptt_cancel` →
 eventos `presence`, `ptt_started`, `ptt_ended`, `ptt_interrupted`, `transmission_created`.
+**Sinalização WebRTC (voz ao vivo):** `webrtc_join`, `webrtc_offer`, `webrtc_answer`, `webrtc_ice` (relay P2P por par).
 
 ---
 

@@ -143,8 +143,10 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
       sector: p.sector,
       sectorLabel: SECTOR_LABELS[p.sector],
       priority,
+      // socket do falante: os ouvintes usam para abrir a conexão WebRTC ao vivo.
+      speakerSocketId: client.id,
     });
-    return { ok: true, startedAt: active.startedAt };
+    return { ok: true, startedAt: active.startedAt, socketId: client.id };
   }
 
   @SubscribeMessage('ptt_cancel')
@@ -199,6 +201,49 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
       this.logger.error(`Falha ao registrar transmissão: ${(err as Error).message}`);
       return { ok: false, error: 'Falha ao registrar a transmissão.' };
     }
+  }
+
+  // ---------------------------------------------------------------------- //
+  // Sinalização WebRTC (voz ao vivo). O servidor atua apenas como signaling
+  // server: encaminha offer/answer/ICE entre pares (malha P2P por canal). A
+  // mídia trafega direto entre navegadores — latência típica < 300 ms.
+  // ---------------------------------------------------------------------- //
+
+  /** Ouvinte anuncia-se ao falante para receber o áudio ao vivo. */
+  @SubscribeMessage('webrtc_join')
+  onWebrtcJoin(@ConnectedSocket() client: Socket, @MessageBody() body: { to: string }) {
+    this.relay('webrtc_join', client, body?.to, {});
+  }
+
+  @SubscribeMessage('webrtc_offer')
+  onWebrtcOffer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { to: string; sdp: unknown },
+  ) {
+    this.relay('webrtc_offer', client, body?.to, { sdp: body?.sdp });
+  }
+
+  @SubscribeMessage('webrtc_answer')
+  onWebrtcAnswer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { to: string; sdp: unknown },
+  ) {
+    this.relay('webrtc_answer', client, body?.to, { sdp: body?.sdp });
+  }
+
+  @SubscribeMessage('webrtc_ice')
+  onWebrtcIce(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { to: string; candidate: unknown },
+  ) {
+    this.relay('webrtc_ice', client, body?.to, { candidate: body?.candidate });
+  }
+
+  /** Encaminha um evento de sinalização a um socket específico, anexando o remetente. */
+  private relay(event: string, from: Socket, to: string, payload: Record<string, unknown>) {
+    if (!to) return { ok: false };
+    this.server.to(to).emit(event, { from: from.id, ...payload });
+    return { ok: true };
   }
 
   private room(channelId: string): string {
