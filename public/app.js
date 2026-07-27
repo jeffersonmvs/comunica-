@@ -25,7 +25,17 @@
     socketId: null,
     localStream: null, // MediaStream do microfone durante a fala
     isSpeaker: false,
-    peers: {}, // socketId remoto -> RTCPeerConnection
+    peers: {}, // socketId remoto -> RTCPeerConnection (malha P2P, fallback)
+    // SFU (mediasoup) — caminho preferencial de voz ao vivo
+    sfu: {
+      available: null, // null=desconhecido, true/false após checar
+      device: null,
+      sendTransport: null,
+      recvTransport: null,
+      recvChannelId: null,
+      producer: null,
+      consumers: {}, // consumerId -> { consumer, audioEl }
+    },
   };
 
   const RTC_CONFIG = {
@@ -183,15 +193,26 @@
   }
 
   function selectChannel(ch) {
+    // Ao trocar de canal, encerra a voz ao vivo do canal anterior.
+    closeSfuRecv();
+    closeAllPeers();
     state.activeChannel = ch;
     $('#active-channel-name').textContent = ch.name;
     $('#active-channel-desc').textContent = ch.description || '';
     $('#feed-channel-tag').textContent = ch.name;
     $('#ptt').disabled = false;
     renderChannels();
-    if (state.socket) state.socket.emit('join_channel', { channelId: ch.id }, (ack) => {
-      if (ack && ack.activeSpeaker) showTalkBanner(ack.activeSpeaker);
-      else hideTalkBanner();
+    if (state.socket) state.socket.emit('join_channel', { channelId: ch.id }, async (ack) => {
+      if (ack && ack.activeSpeaker) {
+        showTalkBanner(ack.activeSpeaker);
+        // Late-join: consome fluxos SFU já ativos no canal.
+        const cap = await emitAck('sfu_capabilities', { channelId: ch.id });
+        if (cap && cap.available && cap.producers && cap.producers.length) {
+          for (const pid of cap.producers) sfuConsume(ch.id, pid).catch(() => {});
+        }
+      } else {
+        hideTalkBanner();
+      }
     });
     loadFeed();
   }
@@ -342,8 +363,14 @@
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       state.localStream = stream;
-      // Conecta ouvintes que já anunciaram interesse (podem ter chegado antes do stream).
-      (state._pendingJoins || []).forEach((id) => speakerConnectTo(id));
+      // Voz ao vivo: prefere o SFU (estrela); se indisponível, usa malha P2P.
+      const track = stream.getAudioTracks()[0];
+      let viaSfu = false;
+      try { viaSfu = track ? await sfuProduce(state.activeChannel.id, track) : false; } catch { viaSfu = false; }
+      if (!viaSfu) {
+        // Fallback P2P: conecta ouvintes que já anunciaram interesse.
+        (state._pendingJoins || []).forEach((id) => speakerConnectTo(id));
+      }
       state._pendingJoins = [];
       const mime = pickMime();
       try {
@@ -367,7 +394,8 @@
     ptt.classList.remove('transmitting');
     ptt.querySelector('.ptt-label').textContent = 'Segure para falar';
 
-    // Encerra a voz ao vivo: fecha os pares (ouvintes também fecham em ptt_ended).
+    // Encerra a voz ao vivo: fecha o producer SFU e os pares P2P.
+    closeSfuProduce();
     closeAllPeers();
     state._pendingJoins = [];
 
@@ -543,8 +571,118 @@
   function updateLiveBadge() {
     const badge = $('#live-badge');
     if (!badge) return;
-    const playing = Object.keys(state.peers).some((id) => document.getElementById('rtc-audio-' + id));
-    badge.classList.toggle('hidden', !(playing && !state.isSpeaker));
+    const meshPlaying = Object.keys(state.peers).some((id) => document.getElementById('rtc-audio-' + id));
+    const sfuPlaying = Object.keys(state.sfu.consumers).length > 0;
+    badge.classList.toggle('hidden', !((meshPlaying || sfuPlaying) && !state.isSpeaker));
+  }
+
+  // ----------------------------------------------------------------------- //
+  // SFU (mediasoup) — caminho preferencial de voz ao vivo (topologia estrela)
+  // ----------------------------------------------------------------------- //
+  const emitAck = (event, payload) =>
+    new Promise((resolve) => {
+      if (!state.socket) return resolve(null);
+      let done = false;
+      state.socket.emit(event, payload, (ack) => { done = true; resolve(ack); });
+      setTimeout(() => { if (!done) resolve(null); }, 8000);
+    });
+
+  // Carrega (uma vez) o mediasoup Device com as capacidades do roteador do canal.
+  async function ensureSfuDevice(channelId) {
+    if (state.sfu.available === false) return false;
+    if (state.sfu.device) return true;
+    if (typeof mediasoupClient === 'undefined') { state.sfu.available = false; return false; }
+    const cap = await emitAck('sfu_capabilities', { channelId });
+    if (!cap || !cap.available) { state.sfu.available = false; return false; }
+    try {
+      const device = new mediasoupClient.Device();
+      await device.load({ routerRtpCapabilities: cap.rtpCapabilities });
+      state.sfu.device = device;
+      state.sfu.available = true;
+      return true;
+    } catch (e) {
+      state.sfu.available = false;
+      return false;
+    }
+  }
+
+  async function createSfuTransport(channelId, direction) {
+    const ack = await emitAck('sfu_create_transport', { channelId });
+    if (!ack || !ack.ok) throw new Error((ack && ack.error) || 'Falha ao criar transporte SFU.');
+    const device = state.sfu.device;
+    const transport =
+      direction === 'send'
+        ? device.createSendTransport(ack.params)
+        : device.createRecvTransport(ack.params);
+    transport.on('connect', ({ dtlsParameters }, cb, errback) => {
+      emitAck('sfu_connect_transport', { transportId: transport.id, dtlsParameters })
+        .then((r) => (r && r.ok ? cb() : errback(new Error('connect falhou'))));
+    });
+    if (direction === 'send') {
+      transport.on('produce', ({ kind, rtpParameters }, cb, errback) => {
+        emitAck('sfu_produce', { channelId, transportId: transport.id, kind, rtpParameters })
+          .then((r) => (r && r.ok ? cb({ id: r.id }) : errback(new Error('produce falhou'))));
+      });
+    }
+    return transport;
+  }
+
+  // Falante: publica a faixa de áudio no SFU.
+  async function sfuProduce(channelId, track) {
+    if (!(await ensureSfuDevice(channelId))) return false;
+    state.sfu.sendTransport = await createSfuTransport(channelId, 'send');
+    state.sfu.producer = await state.sfu.sendTransport.produce({ track });
+    return true;
+  }
+
+  // Ouvinte: consome um producer específico do canal.
+  async function sfuConsume(channelId, producerId) {
+    if (!(await ensureSfuDevice(channelId))) return;
+    // (Re)cria o transporte de recepção se o canal mudou.
+    if (state.sfu.recvChannelId !== channelId || !state.sfu.recvTransport) {
+      closeSfuRecv();
+      state.sfu.recvTransport = await createSfuTransport(channelId, 'recv');
+      state.sfu.recvChannelId = channelId;
+    }
+    const ack = await emitAck('sfu_consume', {
+      channelId,
+      transportId: state.sfu.recvTransport.id,
+      producerId,
+      rtpCapabilities: state.sfu.device.rtpCapabilities,
+    });
+    if (!ack || !ack.ok) return;
+    const consumer = await state.sfu.recvTransport.consume(ack.params);
+    const stream = new MediaStream([consumer.track]);
+    const audioEl = document.createElement('audio');
+    audioEl.autoplay = true;
+    audioEl.srcObject = stream;
+    document.body.appendChild(audioEl);
+    audioEl.play().catch(() => {});
+    state.sfu.consumers[consumer.id] = { consumer, audioEl };
+    consumer.on('producerclose', () => closeSfuConsumer(consumer.id));
+    await emitAck('sfu_resume', { consumerId: consumer.id });
+    updateLiveBadge();
+  }
+
+  function closeSfuConsumer(consumerId) {
+    const c = state.sfu.consumers[consumerId];
+    if (!c) return;
+    try { c.consumer.close(); } catch {}
+    if (c.audioEl) c.audioEl.remove();
+    delete state.sfu.consumers[consumerId];
+    updateLiveBadge();
+  }
+
+  function closeSfuRecv() {
+    Object.keys(state.sfu.consumers).forEach(closeSfuConsumer);
+    if (state.sfu.recvTransport) { try { state.sfu.recvTransport.close(); } catch {} }
+    state.sfu.recvTransport = null;
+    state.sfu.recvChannelId = null;
+  }
+
+  function closeSfuProduce() {
+    if (state.sfu.producer) { try { state.sfu.producer.close(); } catch {} state.sfu.producer = null; }
+    if (state.sfu.sendTransport) { try { state.sfu.sendTransport.close(); } catch {} state.sfu.sendTransport = null; }
   }
 
   // ----------------------------------------------------------------------- //
@@ -576,15 +714,25 @@
     socket.on('webrtc_answer', ({ from, sdp }) => handleAnswer(from, sdp));
     socket.on('webrtc_ice', ({ from, candidate }) => handleIce(from, candidate));
 
-    socket.on('ptt_started', (data) => {
+    // --- Sinalização SFU (mediasoup) -------------------------------------- //
+    // Novo fluxo disponível no canal → ouvinte consome (topologia estrela).
+    socket.on('sfu_new_producer', (data) => {
+      if (state.isSpeaker) return;
+      if (state.activeChannel && data.channelId === state.activeChannel.id) {
+        sfuConsume(data.channelId, data.producerId).catch(() => {});
+      }
+    });
+
+    socket.on('ptt_started', async (data) => {
       state.activeSpeakers[data.channelId] = data;
       renderChannels();
       const isMine = data.userId === state.user.id;
       const sameChannel = state.activeChannel && data.channelId === state.activeChannel.id;
       if (sameChannel && !isMine) {
         showTalkBanner(data);
-        // Ouvinte do canal ativo pede a voz ao vivo ao falante (WebRTC).
-        if (data.speakerSocketId) socket.emit('webrtc_join', { to: data.speakerSocketId });
+        // Prefere SFU: aguarda 'sfu_new_producer'. Só usa malha P2P se SFU indisponível.
+        const sfuOk = await ensureSfuDevice(data.channelId).catch(() => false);
+        if (!sfuOk && data.speakerSocketId) socket.emit('webrtc_join', { to: data.speakerSocketId });
       }
       if (data.priority === 'emergencia' && !isMine) {
         toast(`🔴 EMERGÊNCIA — ${data.userName} (${data.sectorLabel || ''})`, 'emergencia');
@@ -595,8 +743,8 @@
       delete state.activeSpeakers[data.channelId];
       renderChannels();
       if (state.activeChannel && data.channelId === state.activeChannel.id) hideTalkBanner();
-      // Encerra a voz ao vivo deste canal (fecha os pares e para o áudio).
-      if (!state.isSpeaker) closeAllPeers();
+      // Encerra a voz ao vivo deste canal (SFU + malha P2P).
+      if (!state.isSpeaker) { closeSfuRecv(); closeAllPeers(); }
     });
 
     socket.on('ptt_interrupted', () => {

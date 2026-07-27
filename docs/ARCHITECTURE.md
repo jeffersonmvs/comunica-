@@ -19,22 +19,25 @@ O conceito define cinco prioridades inegociáveis. Elas guiam cada decisão:
 ┌────────────────────────── Navegador ──────────────────────────┐
 │  public/index.html · styles.css · app.js                       │
 │  • Painel Operacional (presença, canais, feed, ocorrências)    │
-│  • Console PTT: MediaRecorder (áudio) + Web Speech API (texto)  │
+│  • Console PTT: SFU (mediasoup-client) / WebRTC P2P (fallback)  │
+│    + MediaRecorder (gravação) + Web Speech API (transcrição)   │
 │  • Socket.IO client (servido pelo backend, sem CDN externo)    │
-└───────────────▲───────────────────────────────▲───────────────┘
-      REST (JSON)│                       WebSocket│(Socket.IO)
-┌───────────────┴───────────────────────────────┴───────────────┐
+└──────▲──────────────▲───────────────────────────▲─────────────┘
+  voz ao vivo│  REST (JSON)│                WebSocket│(Socket.IO)
+  (WebRTC:SFU│             │      + sinalização SFU/P2P│
+   ou P2P)   │             │                          │
+┌───────────┴─────────────┴──────────────────────────┴──────────┐
 │                         Backend NestJS                         │
 │                                                                │
 │  Controllers ── UsersController, ChannelsController,           │
 │                 TransmissionsController, OccurrencesController,│
-│                 SearchController                               │
-│  Gateway ────── PttGateway (presença, arbitragem de canal por  │
-│                 prioridade, difusão de transmissões)           │
-│  Serviços ───── AiService (stub determinístico)                │
+│                 SearchController, AuthController               │
+│  Gateway ────── PttGateway (presença, arbitragem, sinalização  │
+│                 SFU/WebRTC, difusão de transmissões)           │
+│  Serviços ───── AiService (stub) · AuthService (JWT+RBAC)      │
+│                 SfuService (mediasoup: worker/routers/transports)│
 │                 TransmissionsService (registro + IA + índice)  │
-│                 OccurrencesService (Livro de Ocorrências)      │
-│                 SearchService (FTS5)                           │
+│                 OccurrencesService · SearchService (FTS5)      │
 │  Infra ──────── DatabaseService (better-sqlite3 + FTS5)        │
 │                 Áudio no sistema de arquivos (AUDIO_DIR)       │
 └────────────────────────────────────────────────────────────────┘
@@ -69,13 +72,13 @@ PostgreSQL.
    profissional); caso contrário, retorna `ptt_denied`.
 3. `ptt_started` é difundido (com `speakerSocketId`). O falante abre o microfone
    **uma vez** e usa o mesmo `MediaStream` para dois destinos em paralelo:
-   - **WebRTC (voz ao vivo)** — cada ouvinte do canal, ao receber `ptt_started`,
-     emite `webrtc_join`; o falante cria um `RTCPeerConnection` por ouvinte,
-     adiciona a faixa de áudio e negocia offer/answer/ICE (relay pelo gateway).
-     A mídia trafega **direto entre navegadores** (< 300 ms).
+   - **Voz ao vivo** — caminho preferencial é o **SFU (mediasoup)**: o falante
+     publica **um** fluxo (`sfu_produce`); o servidor encaminha a cada ouvinte
+     (`sfu_consume`). Se o SFU estiver indisponível, cai para a **malha P2P**
+     (WebRTC direto entre navegadores). Latência típica **< 300 ms**.
    - **`MediaRecorder`** grava o clipe; a `Web Speech API` gera a transcrição.
-4. Usuário **solta o botão** → fecha os pares WebRTC e envia `ptt_end` com o
-   áudio gravado (base64) + transcrição.
+4. Usuário **solta o botão** → encerra o fluxo ao vivo (fecha o Producer SFU /
+   os pares P2P) e envia `ptt_end` com o áudio gravado (base64) + transcrição.
 5. `TransmissionsService.create` executa o pipeline:
    - `AiService.analyze()` → normaliza transcrição, extrai palavras-chave,
      **classifica prioridade**, **gera resumo** e **detecta ocorrência**;
@@ -85,14 +88,38 @@ PostgreSQL.
 6. `transmission_created` é difundido: o painel e o histórico atualizam. A voz
    já foi ouvida **ao vivo**; o clipe gravado fica disponível para reprodução.
 
-### Sinalização WebRTC (malha P2P)
+### Voz ao vivo — SFU (mediasoup) com fallback P2P
 
-O `PttGateway` atua apenas como **signaling server**: encaminha `webrtc_join`,
-`webrtc_offer`, `webrtc_answer` e `webrtc_ice` entre pares (cada evento leva um
-`to` = socket destino; o gateway reenvia anexando `from` = socket remetente).
-Não há mídia passando pelo servidor. STUN público é usado para candidatos ICE;
-em `localhost`/LAN, candidatos host bastam. A malha atende grupos pequenos —
-para dezenas de ouvintes por canal, evoluir para um **SFU** (ver roadmap).
+**SFU (Selective Forwarding Unit), topologia em estrela — caminho preferencial.**
+O `SfuService` mantém um **Worker** mediasoup e um **Router por canal** (codec
+Opus). O fluxo de sinalização (via `PttGateway`):
+
+1. `sfu_capabilities {channelId}` → `{ available, rtpCapabilities, producers }`.
+   O cliente carrega um `mediasoup-client` **Device** com essas capacidades.
+2. `sfu_create_transport` → o servidor cria um `WebRtcTransport` e devolve
+   `iceParameters/iceCandidates/dtlsParameters`. `sfu_connect_transport` conclui
+   o DTLS.
+3. Falante: `sfu_produce {kind, rtpParameters}` cria um **Producer**; o servidor
+   emite `sfu_new_producer` aos ouvintes do canal.
+4. Ouvinte: `sfu_consume {producerId, rtpCapabilities}` cria um **Consumer**
+   (pausado) e `sfu_resume` inicia o áudio. *Late-join* consome os producers já
+   ativos (retornados em `sfu_capabilities.producers`).
+5. Em `ptt_end`/`ptt_cancel`/desconexão, o Producer é fechado — os Consumers
+   recebem `producerclose` e param.
+
+Vantagem sobre a malha: o falante envia **um** fluxo (não N conexões), então a
+carga não cresce com o número de ouvintes — escala para o canal inteiro.
+
+**Fallback malha P2P.** Se o worker do mediasoup não iniciar (`available=false`),
+o cliente usa WebRTC **direto entre navegadores**: o `PttGateway` só encaminha
+`webrtc_join/offer/answer/ice` (cada evento leva `to` = destino; reenvia com
+`from` = remetente). STUN público para candidatos ICE; em `localhost`/LAN,
+candidatos host bastam.
+
+> **Verificação:** sinalização, criação de transports (ICE/DTLS), router/codec e
+> o *plumbing* de produce/consume são cobertos por testes automatizados. O
+> **encaminhamento real de mídia** (RTP Opus falante→servidor→ouvinte) exige
+> navegadores reais e é validado manualmente (duas abas, mesmo canal).
 
 ## Camada de IA (ponto de extensão)
 
@@ -147,7 +174,7 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
 | --- | --- | --- |
 | App | Web app (HTML/JS) | Flutter |
 | Backend | NestJS | NestJS ou Go |
-| PTT / voz ao vivo | **WebRTC malha P2P** (< 300 ms) + gravação do clipe | WebRTC via **SFU** (escala) |
+| PTT / voz ao vivo | **SFU mediasoup** (estrela, < 300 ms) + fallback P2P + gravação | SFU em cluster + gravação server-side |
 | Mensageria | eventos Socket.IO | NATS ou MQTT |
 | Banco principal | SQLite | PostgreSQL |
 | Cache/presença | memória do processo | Redis |
@@ -162,8 +189,11 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
 ## Roadmap
 
 - [x] **Streaming de voz em tempo real com WebRTC (latência < 300 ms)** — malha P2P.
-- [ ] Evoluir a voz ao vivo de malha P2P para um **SFU** (ex.: mediasoup) para
-      suportar dezenas de ouvintes por canal.
+- [x] **SFU (mediasoup)** para voz ao vivo em estrela — escala por canal;
+      malha P2P mantida como fallback automático.
+- [ ] SFU em **cluster** (pool de workers/roteadores, múltiplas instâncias),
+      gravação server-side a partir do SFU e verificação de mídia automatizada
+      (headless com RTP sintético).
 - [ ] Substituir stub de transcrição por Whisper com diarização de locutores.
 - [ ] Resumo/classificação/pesquisa semântica via LLM + banco vetorial.
 - [ ] Presença e arbitragem de canal em Redis (escala horizontal).
@@ -179,12 +209,17 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
   adequado para demonstração, não para produção multi-instância.
 - **Presença em memória:** reinícios limpam a presença; o registro histórico
   (transmissões/ocorrências) é persistido e preservado.
-- **Voz ao vivo em malha P2P:** cada falante mantém uma conexão por ouvinte —
-  ótimo para grupos pequenos; dezenas de ouvintes por canal pedem um SFU.
+- **Voz ao vivo via SFU (mediasoup), 1 worker/router por canal:** ótimo para o
+  MVP; produção com muitos canais/instâncias pede pool de workers e cluster.
+  Fallback P2P (malha) cobre ambientes sem o worker nativo.
+- **SFU exige rede:** fora de `localhost`, defina `SFU_ANNOUNCED_IP` (IP público)
+  e libere a faixa UDP `SFU_MIN_PORT`–`SFU_MAX_PORT`.
 - **A gravação (registro permanente) trafega em base64 no `ptt_end`** (limite de
   25 MB no corpo) — separada do caminho ao vivo. No produto, a própria captura
   do SFU pode alimentar a gravação.
 - **WebRTC exige contexto seguro:** funciona em `localhost` (demo) ou HTTPS.
+- **Mídia real do SFU não é testada em headless:** signaling/transports/produce/
+  consume têm cobertura automatizada; o RTP fim-a-fim é validado em navegador.
 - **Autenticação por login+senha (JWT) e RBAC** já implementados. Evoluções de
   produção: IdP/SSO, rotação de segredo, refresh tokens e criptografia ponta a
   ponta.

@@ -8,6 +8,7 @@ import { ChannelsModule } from './channels/channels.module';
 import { OccurrencesModule } from './occurrences/occurrences.module';
 import { TransmissionsModule } from './transmissions/transmissions.module';
 import { SearchModule } from './search/search.module';
+import { SfuModule } from './sfu/sfu.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { JwtAuthGuard } from './auth/jwt-auth.guard';
 import { RolesGuard } from './auth/roles.guard';
@@ -22,6 +23,7 @@ import { RolesGuard } from './auth/roles.guard';
     OccurrencesModule,
     TransmissionsModule,
     SearchModule,
+    SfuModule,
     RealtimeModule,
   ],
   providers: [

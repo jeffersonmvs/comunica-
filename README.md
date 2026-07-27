@@ -13,7 +13,7 @@ Este repositório contém um **MVP funcional e executável** da plataforma: um b
 | Recurso do conceito | Status neste MVP |
 | --- | --- |
 | Push-to-Talk com um toque (segurar para falar) | ✅ Web app (pointer + barra de espaço) |
-| **Voz ao vivo em tempo real (< 300 ms)** | ✅ WebRTC (malha P2P, sinalização via Socket.IO) |
+| **Voz ao vivo em tempo real (< 300 ms)** | ✅ **SFU (mediasoup)** — estrela; malha P2P como fallback |
 | Comunicação por canais (Diretoria, CC, UTI, …) | ✅ 9 canais padrão |
 | Prioridades 🟢🟡🟠🔴 estilo rádio | ✅ Emergência interrompe transmissão não crítica |
 | Presença em tempo real / "quem está no ar" | ✅ via WebSocket |
@@ -29,11 +29,11 @@ Este repositório contém um **MVP funcional e executável** da plataforma: um b
 | **Autenticação (login + senha, JWT)** | ✅ REST e WebSocket protegidos |
 | **Controle de acesso por papel (RBAC)** | ✅ Admin / Direção / Coordenador / Operador |
 
-A **voz ao vivo** usa WebRTC em **malha P2P** (cada falante conecta-se diretamente aos ouvintes do canal; o servidor só faz a sinalização). A mídia trafega direto entre navegadores, com latência típica **< 300 ms** — atendendo à meta do conceito. Em paralelo, o áudio é gravado e enviado ao final para o **registro permanente** + IA: *nada é perdido*. Malha P2P atende grupos pequenos; para escala, o próximo passo é um SFU (ex.: mediasoup) — ver [roadmap](docs/ARCHITECTURE.md#roadmap).
+A **voz ao vivo** usa um **SFU (Selective Forwarding Unit) com mediasoup**: o falante envia **um** fluxo de áudio ao servidor (Producer) e o servidor **encaminha** para cada ouvinte (Consumers) — topologia em **estrela**, que escala para muitos ouvintes por canal sem sobrecarregar o falante. A mídia é WebRTC (latência típica **< 300 ms**). Se o worker do mediasoup não iniciar no ambiente, o cliente **cai automaticamente para a malha P2P** (fallback). Em paralelo, o áudio é gravado e enviado ao final para o **registro permanente** + IA: *nada é perdido*.
 
-Itens do conceito ainda **não** implementados neste MVP (ver [roadmap](docs/ARCHITECTURE.md#roadmap)): app Flutter nativo, SFU para escala, diarização real de locutores, criptografia ponta a ponta, NATS/MQTT, PostgreSQL + banco vetorial, funcionamento em segundo plano/mãos-livres.
+Itens do conceito ainda **não** implementados neste MVP (ver [roadmap](docs/ARCHITECTURE.md#roadmap)): app Flutter nativo, diarização real de locutores, criptografia ponta a ponta, NATS/MQTT, PostgreSQL + banco vetorial, funcionamento em segundo plano/mãos-livres.
 
-> ⚠️ WebRTC/microfone exigem **contexto seguro**: funciona em `http://localhost` (demo) ou sob **HTTPS** em produção. Para ouvir a voz ao vivo, abra duas abas/dispositivos, entre no **mesmo canal** e segure para falar em um deles.
+> ⚠️ WebRTC/microfone exigem **contexto seguro**: funciona em `http://localhost` (demo) ou sob **HTTPS** em produção. Para ouvir a voz ao vivo, abra duas abas/dispositivos, entre no **mesmo canal** e segure para falar em um deles. Fora de `localhost`, o SFU precisa anunciar o IP público do servidor: defina `SFU_ANNOUNCED_IP` (e libere a faixa de portas UDP `SFU_MIN_PORT`–`SFU_MAX_PORT`).
 
 ---
 
@@ -69,7 +69,7 @@ Pré-requisitos: **Node.js ≥ 18**.
 # 1. Instalar dependências
 npm install
 
-# 2. Compilar
+# 2. Compilar (tsc + bundle do cliente mediasoup para public/vendor)
 npm run build
 
 # 3. Popular canais + um usuário demo por setor (opcional)
@@ -112,6 +112,9 @@ Copie `.env.example` para `.env`. Padrões sensatos já funcionam sem configura�
 | `AUDIO_DIR` | `./data/audio` | Diretório dos áudios (→ bucket S3 no futuro) |
 | `JWT_SECRET` | `comunica-plus-dev-…` | Segredo de assinatura do JWT (**defina em produção**) |
 | `JWT_EXPIRES_IN` | `12h` | Validade do token |
+| `SFU_LISTEN_IP` | `127.0.0.1` | IP que o SFU escuta (WebRTC) |
+| `SFU_ANNOUNCED_IP` | — | IP público anunciado (necessário fora de `localhost`) |
+| `SFU_MIN_PORT` / `SFU_MAX_PORT` | `40000` / `40100` | Faixa de portas UDP do SFU |
 
 ---
 
@@ -138,7 +141,8 @@ Todas as rotas exigem `Authorization: Bearer <token>`, exceto as marcadas 🔓 (
 
 **WebSocket (Socket.IO):** autenticado por token no handshake (`auth: { token }`). `identify`, `join_channel`, `ptt_start`, `ptt_end`, `ptt_cancel` →
 eventos `presence`, `ptt_started`, `ptt_ended`, `ptt_interrupted`, `transmission_created`, `unauthorized`.
-**Sinalização WebRTC (voz ao vivo):** `webrtc_join`, `webrtc_offer`, `webrtc_answer`, `webrtc_ice` (relay P2P por par).
+**Sinalização SFU (voz ao vivo, mediasoup):** `sfu_capabilities`, `sfu_create_transport`, `sfu_connect_transport`, `sfu_produce`, `sfu_consume`, `sfu_resume` → evento `sfu_new_producer`.
+**Fallback WebRTC malha P2P:** `webrtc_join`, `webrtc_offer`, `webrtc_answer`, `webrtc_ice` (relay por par).
 
 ---
 
@@ -155,7 +159,8 @@ src/
   transmissions/ registro permanente (áudio + IA + índice de busca)
   occurrences/   Livro de Ocorrências Inteligente
   search/        busca inteligente sobre FTS5
-  realtime/      gateway PTT (presença, arbitragem de canal, difusão)
+  sfu/           voz ao vivo via mediasoup (SFU: worker, routers, transports)
+  realtime/      gateway PTT (presença, arbitragem, sinalização SFU/WebRTC, difusão)
 public/          web app (painel + console PTT)
 scripts/         smoke test do pipeline
 docs/            arquitetura e roadmap

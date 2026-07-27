@@ -5,6 +5,9 @@ node_modules/
 dist/
 *.tsbuildinfo
 
+# Bundle do cliente (gerado por `npm run build:client`)
+public/vendor/
+
 # Runtime data (audio blobs + SQLite database are generated at runtime)
 data/
 

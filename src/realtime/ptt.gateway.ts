@@ -12,6 +12,7 @@ import { Server, Socket } from 'socket.io';
 import { UsersService } from '../users/users.service';
 import { TransmissionsService } from '../transmissions/transmissions.service';
 import { AuthService } from '../auth/auth.service';
+import { SfuService } from '../sfu/sfu.service';
 import { isPriority, Priority, PRIORITY_WEIGHT, Sector, SECTOR_LABELS } from '../common/enums';
 
 interface Presence {
@@ -49,6 +50,7 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly users: UsersService,
     private readonly transmissions: TransmissionsService,
     private readonly auth: AuthService,
+    private readonly sfu: SfuService,
   ) {}
 
   handleConnection(client: Socket): void {
@@ -76,6 +78,7 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   handleDisconnect(client: Socket): void {
+    this.sfu.cleanupSocket(client.id);
     const p = this.presence.get(client.id);
     this.presence.delete(client.id);
     // Libera o canal se este socket estava transmitindo.
@@ -179,6 +182,7 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const active = channelId ? this.activeByChannel.get(channelId) : undefined;
     if (active && active.socketId === client.id) {
       this.activeByChannel.delete(channelId);
+      this.sfu.closeProducersOfSocket(client.id);
       this.server.emit('ptt_ended', { channelId });
     }
     return { ok: true };
@@ -205,6 +209,8 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Libera o canal.
     const active = this.activeByChannel.get(channelId);
     if (active?.socketId === client.id) this.activeByChannel.delete(channelId);
+    // Encerra o fluxo SFU do falante (ouvintes recebem 'producerclose').
+    this.sfu.closeProducersOfSocket(client.id);
     this.server.emit('ptt_ended', { channelId });
 
     try {
@@ -268,6 +274,98 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!to) return { ok: false };
     this.server.to(to).emit(event, { from: from.id, ...payload });
     return { ok: true };
+  }
+
+  // ---------------------------------------------------------------------- //
+  // Sinalização SFU (mediasoup). Topologia em estrela: o falante publica UM
+  // fluxo (produce) e o servidor encaminha a cada ouvinte (consume) — escala
+  // para muitos ouvintes por canal. Se o SFU estiver indisponível, o cliente
+  // usa a malha P2P acima como fallback.
+  // ---------------------------------------------------------------------- //
+
+  /** Capacidades RTP do canal + disponibilidade do SFU. */
+  @SubscribeMessage('sfu_capabilities')
+  async onSfuCapabilities(@MessageBody() body: { channelId: string }) {
+    if (!this.sfu.isAvailable() || !body?.channelId) return { available: false };
+    try {
+      const rtpCapabilities = await this.sfu.getRtpCapabilities(body.channelId);
+      const producers = this.sfu.producersOfChannel(body.channelId);
+      return { available: true, rtpCapabilities, producers };
+    } catch {
+      return { available: false };
+    }
+  }
+
+  @SubscribeMessage('sfu_create_transport')
+  async onSfuCreateTransport(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { channelId: string },
+  ) {
+    try {
+      const params = await this.sfu.createTransport(body.channelId, client.id);
+      return { ok: true, params };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_connect_transport')
+  async onSfuConnectTransport(@MessageBody() body: { transportId: string; dtlsParameters: any }) {
+    try {
+      await this.sfu.connectTransport(body.transportId, body.dtlsParameters);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_produce')
+  async onSfuProduce(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { channelId: string; transportId: string; kind: any; rtpParameters: any },
+  ) {
+    try {
+      const id = await this.sfu.produce(body.transportId, body.kind, body.rtpParameters, client.id);
+      // Avisa os ouvintes do canal que há um novo fluxo para consumir.
+      client.to(this.room(body.channelId)).emit('sfu_new_producer', {
+        channelId: body.channelId,
+        producerId: id,
+        speakerSocketId: client.id,
+      });
+      return { ok: true, id };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_consume')
+  async onSfuConsume(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    body: { channelId: string; transportId: string; producerId: string; rtpCapabilities: any },
+  ) {
+    try {
+      const params = await this.sfu.consume(
+        body.channelId,
+        body.transportId,
+        body.producerId,
+        body.rtpCapabilities,
+        client.id,
+      );
+      return { ok: true, params };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_resume')
+  async onSfuResume(@MessageBody() body: { consumerId: string }) {
+    try {
+      await this.sfu.resumeConsumer(body.consumerId);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
   }
 
   private room(channelId: string): string {

@@ -22,6 +22,7 @@ const { TransmissionsService } = require('../dist/transmissions/transmissions.se
 const { SearchService } = require('../dist/search/search.service');
 const { OccurrencesService } = require('../dist/occurrences/occurrences.service');
 const { AuthService } = require('../dist/auth/auth.service');
+const { SfuService } = require('../dist/sfu/sfu.service');
 
 let failures = 0;
 function assert(cond, msg) {
@@ -100,6 +101,16 @@ function assert(cond, msg) {
   const stats = transmissions.stats();
   assert(stats.total === 1, 'contagem total de transmissões');
   assert(stats.today === 1, 'contagem do dia');
+
+  console.log('\n[6] SFU (mediasoup) — voz ao vivo em estrela');
+  const sfu = app.get(SfuService);
+  await sfu.init();
+  assert(sfu.isAvailable(), 'worker mediasoup disponível');
+  const caps = await sfu.getRtpCapabilities(channel.id);
+  assert(caps.codecs.some((c) => c.mimeType === 'audio/opus'), 'roteador do canal expõe codec opus');
+  const transport = await sfu.createTransport(channel.id, 'socket-teste');
+  assert(!!transport.id && !!transport.iceParameters && transport.iceCandidates.length >= 0, 'WebRtcTransport criado com ICE/DTLS');
+  sfu.cleanupSocket('socket-teste');
 
   await app.close();
   fs.rmSync(tmp, { recursive: true, force: true });
