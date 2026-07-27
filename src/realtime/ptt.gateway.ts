@@ -11,6 +11,7 @@ import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { UsersService } from '../users/users.service';
 import { TransmissionsService } from '../transmissions/transmissions.service';
+import { AuthService } from '../auth/auth.service';
 import { isPriority, Priority, PRIORITY_WEIGHT, Sector, SECTOR_LABELS } from '../common/enums';
 
 interface Presence {
@@ -47,10 +48,31 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     private readonly users: UsersService,
     private readonly transmissions: TransmissionsService,
+    private readonly auth: AuthService,
   ) {}
 
   handleConnection(client: Socket): void {
-    this.logger.log(`Conexão: ${client.id}`);
+    // Autenticação obrigatória via token no handshake (auth: { token }).
+    const token: string | undefined =
+      client.handshake?.auth?.token || (client.handshake?.query?.token as string | undefined);
+    if (!token) {
+      this.logger.warn(`Conexão sem token recusada: ${client.id}`);
+      client.emit('unauthorized', { reason: 'Token ausente.' });
+      client.disconnect(true);
+      return;
+    }
+    try {
+      const payload = this.auth.verify(token);
+      const user = this.users.findById(payload.sub);
+      if (!user) throw new Error('usuário inexistente');
+      // Vincula a identidade autenticada ao socket (não confia em dados do cliente).
+      client.data.userId = user.id;
+      this.logger.log(`Conexão autenticada: ${client.id} (${user.name})`);
+    } catch {
+      this.logger.warn(`Token inválido, conexão recusada: ${client.id}`);
+      client.emit('unauthorized', { reason: 'Token inválido ou expirado.' });
+      client.disconnect(true);
+    }
   }
 
   handleDisconnect(client: Socket): void {
@@ -68,9 +90,11 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('identify')
-  onIdentify(@ConnectedSocket() client: Socket, @MessageBody() body: { userId: string }) {
-    const user = this.users.findById(body?.userId);
-    if (!user) return { ok: false, error: 'Usuário não encontrado.' };
+  onIdentify(@ConnectedSocket() client: Socket) {
+    // Usa a identidade autenticada no handshake — ignora qualquer userId do cliente.
+    const userId: string | undefined = client.data?.userId;
+    const user = userId ? this.users.findById(userId) : null;
+    if (!user) return { ok: false, error: 'Sessão não autenticada.' };
     this.presence.set(client.id, {
       socketId: client.id,
       userId: user.id,

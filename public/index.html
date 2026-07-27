@@ -12,12 +12,30 @@
     <div class="login-card">
       <div class="brand"><span class="radio-dot"></span> COMUNICA<span class="plus">+</span></div>
       <p class="tagline">Comunicação operacional hospitalar Push-to-Talk</p>
-      <label for="login-name">Nome</label>
-      <input id="login-name" type="text" placeholder="Ex.: Dra. Ana Souza" autocomplete="name" />
-      <label for="login-sector">Setor / Função</label>
-      <select id="login-sector"></select>
-      <button id="login-btn" class="btn-primary">Entrar no rádio</button>
-      <p class="hint">Seu acesso identifica quem fala em cada transmissão (responsabilidade e rastreabilidade).</p>
+
+      <div class="auth-tabs">
+        <button id="tab-login" class="auth-tab active" type="button">Entrar</button>
+        <button id="tab-register" class="auth-tab" type="button">Cadastrar</button>
+      </div>
+
+      <!-- Campos de cadastro (ocultos no modo Entrar) -->
+      <div id="register-fields" class="hidden">
+        <label for="reg-name">Nome</label>
+        <input id="reg-name" type="text" placeholder="Ex.: Dra. Ana Souza" autocomplete="name" />
+        <label for="reg-sector">Setor / Função</label>
+        <select id="reg-sector"></select>
+        <label for="reg-role">Papel de acesso</label>
+        <select id="reg-role"></select>
+      </div>
+
+      <label for="auth-login">Login</label>
+      <input id="auth-login" type="text" placeholder="ex.: centro_cirurgico" autocomplete="username" />
+      <label for="auth-password">Senha</label>
+      <input id="auth-password" type="password" placeholder="••••" autocomplete="current-password" />
+
+      <button id="auth-btn" class="btn-primary">Entrar no rádio</button>
+      <p id="auth-error" class="auth-error hidden"></p>
+      <p class="hint">Seu acesso identifica quem fala em cada transmissão (responsabilidade e rastreabilidade). Demo: login <code>admin</code> / senha <code>1234</code>.</p>
     </div>
   </div>
 

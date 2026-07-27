@@ -26,6 +26,8 @@ Este repositório contém um **MVP funcional e executável** da plataforma: um b
 | Confirmação de recebimento / escuta | ✅ |
 | Painel operacional (online, canais, últimas transmissões, ocorrências) | ✅ |
 | Reprodução das transmissões | ✅ |
+| **Autenticação (login + senha, JWT)** | ✅ REST e WebSocket protegidos |
+| **Controle de acesso por papel (RBAC)** | ✅ Admin / Direção / Coordenador / Operador |
 
 A **voz ao vivo** usa WebRTC em **malha P2P** (cada falante conecta-se diretamente aos ouvintes do canal; o servidor só faz a sinalização). A mídia trafega direto entre navegadores, com latência típica **< 300 ms** — atendendo à meta do conceito. Em paralelo, o áudio é gravado e enviado ao final para o **registro permanente** + IA: *nada é perdido*. Malha P2P atende grupos pequenos; para escala, o próximo passo é um SFU (ex.: mediasoup) — ver [roadmap](docs/ARCHITECTURE.md#roadmap).
 
@@ -78,7 +80,9 @@ npm start
 # COMUNICA+ no ar em http://localhost:3000
 ```
 
-Abra **http://localhost:3000**, informe seu nome e setor, selecione um canal e **segure o botão para falar** (ou a barra de espaço). Para testar em "grupo", abra a URL em duas abas/navegadores com usuários diferentes.
+Abra **http://localhost:3000** e **entre** com uma credencial demo (aba **Entrar**) ou **cadastre-se** (aba **Cadastrar**). Selecione um canal e **segure o botão para falar** (ou a barra de espaço). Para testar em "grupo"/voz ao vivo, abra a URL em duas abas/navegadores com usuários diferentes, no **mesmo canal**.
+
+> 🔐 **Credenciais demo** (criadas pelo `npm run seed`): login = **chave do setor** (ex.: `centro_cirurgico`, `uti`, `diretoria`… ) ou **`admin`**; senha = **`1234`**. O papel de acesso (RBAC) é derivado do setor: direção → *Direção*, coordenações → *Coordenador*, demais → *Operador*.
 
 > 💡 A transcrição ao vivo usa a Web Speech API (melhor no Chrome). Sem microfone? Use o campo **"Sem microfone? Enviar como texto"** — o pipeline de IA, registro e Livro de Ocorrências funciona igualmente.
 
@@ -106,15 +110,23 @@ Copie `.env.example` para `.env`. Padrões sensatos já funcionam sem configura�
 | `PORT` | `3000` | Porta HTTP/WebSocket |
 | `DATABASE_PATH` | `./data/comunica.db` | Arquivo SQLite |
 | `AUDIO_DIR` | `./data/audio` | Diretório dos áudios (→ bucket S3 no futuro) |
+| `JWT_SECRET` | `comunica-plus-dev-…` | Segredo de assinatura do JWT (**defina em produção**) |
+| `JWT_EXPIRES_IN` | `12h` | Validade do token |
 
 ---
 
 ## API (resumo)
 
+Todas as rotas exigem `Authorization: Bearer <token>`, exceto as marcadas 🔓 (públicas). 🛡️ = exige papel mínimo (RBAC).
+
 | Método | Rota | Descrição |
 | --- | --- | --- |
-| `GET` | `/api/users/sectors` | Setores/funções disponíveis |
-| `POST` | `/api/users` | Cria/identifica usuário |
+| `POST` | `/api/auth/register` 🔓 | Cadastra usuário e retorna token |
+| `POST` | `/api/auth/login` 🔓 | Autentica (login + senha) e retorna token |
+| `GET` | `/api/auth/me` | Usuário autenticado |
+| `GET` | `/api/users/sectors` 🔓 | Setores/funções disponíveis |
+| `GET` | `/api/users/roles` 🔓 | Papéis de acesso (RBAC) |
+| `GET` | `/api/users` 🛡️ Direção+ | Lista de usuários |
 | `GET` | `/api/channels` | Lista canais |
 | `GET` | `/api/transmissions?channelId=&limit=` | Histórico de transmissões |
 | `GET` | `/api/transmissions/:id/audio` | Reproduz áudio original |
@@ -122,10 +134,10 @@ Copie `.env.example` para `.env`. Padrões sensatos já funcionam sem configura�
 | `GET` | `/api/transmissions/stats` | Estatísticas do painel |
 | `GET` | `/api/search?q=` | Busca inteligente (palavra ou pergunta) |
 | `GET` | `/api/occurrences` | Livro de Ocorrências |
-| `PATCH` | `/api/occurrences/:id/status` | Avança status da ocorrência |
+| `PATCH` | `/api/occurrences/:id/status` 🛡️ Coordenador+ | Avança status da ocorrência |
 
-**WebSocket (Socket.IO):** `identify`, `join_channel`, `ptt_start`, `ptt_end`, `ptt_cancel` →
-eventos `presence`, `ptt_started`, `ptt_ended`, `ptt_interrupted`, `transmission_created`.
+**WebSocket (Socket.IO):** autenticado por token no handshake (`auth: { token }`). `identify`, `join_channel`, `ptt_start`, `ptt_end`, `ptt_cancel` →
+eventos `presence`, `ptt_started`, `ptt_ended`, `ptt_interrupted`, `transmission_created`, `unauthorized`.
 **Sinalização WebRTC (voz ao vivo):** `webrtc_join`, `webrtc_offer`, `webrtc_answer`, `webrtc_ice` (relay P2P por par).
 
 ---
@@ -134,10 +146,11 @@ eventos `presence`, `ptt_started`, `ptt_ended`, `ptt_interrupted`, `transmission
 
 ```
 src/
-  common/        enums e tipos do domínio (setores, prioridades, status)
-  database/      conexão SQLite + esquema (FTS5)
+  common/        enums e tipos do domínio (setores, prioridades, papéis, status) + hash de senha
+  database/      conexão SQLite + esquema (FTS5) + migrações
   ai/            camada de IA (stub determinístico: transcrição/resumo/prioridade/ocorrência)
-  users/         usuários e setores
+  auth/          autenticação JWT + RBAC (guards, decorators @Public/@Roles)
+  users/         usuários, setores e papéis
   channels/      canais de rádio
   transmissions/ registro permanente (áudio + IA + índice de busca)
   occurrences/   Livro de Ocorrências Inteligente

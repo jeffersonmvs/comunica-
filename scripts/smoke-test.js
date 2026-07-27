@@ -21,6 +21,7 @@ const { ChannelsService } = require('../dist/channels/channels.service');
 const { TransmissionsService } = require('../dist/transmissions/transmissions.service');
 const { SearchService } = require('../dist/search/search.service');
 const { OccurrencesService } = require('../dist/occurrences/occurrences.service');
+const { AuthService } = require('../dist/auth/auth.service');
 
 let failures = 0;
 function assert(cond, msg) {
@@ -39,11 +40,26 @@ function assert(cond, msg) {
   const transmissions = app.get(TransmissionsService);
   const search = app.get(SearchService);
   const occurrences = app.get(OccurrencesService);
+  const auth = app.get(AuthService);
 
   channels.seedDefaults();
 
+  console.log('\n[0] Autenticação + RBAC');
+  const reg = auth.register({
+    name: 'Dr. Teste Cirúrgico', sector: 'centro_cirurgico', login: 'teste_cc', password: 'senha123',
+  });
+  assert(!!reg.token && !!reg.user.id, 'register retorna token + usuário');
+  assert(reg.user.role === 'coordenador', 'papel default por setor (CC → coordenador): ' + reg.user.role);
+  const good = auth.login({ login: 'teste_cc', password: 'senha123' });
+  assert(good.user.id === reg.user.id, 'login com senha correta autentica');
+  let badRejected = false;
+  try { auth.login({ login: 'teste_cc', password: 'errada' }); } catch { badRejected = true; }
+  assert(badRejected, 'login com senha errada é rejeitado');
+  const payload = auth.verify(good.token);
+  assert(payload.sub === reg.user.id && payload.role === 'coordenador', 'JWT verificável com sub + role');
+
   console.log('\n[1] Usuários e canais');
-  const user = users.create('Dr. Teste Cirúrgico', 'centro_cirurgico');
+  const user = reg.user;
   assert(!!user.id, 'usuário criado');
   const channel = channels.findByKey('centro_cirurgico');
   assert(!!channel, 'canal padrão existe');

@@ -1,6 +1,7 @@
 import { Body, Controller, Get, Param, Patch, Query } from '@nestjs/common';
 import { OccurrencesService } from './occurrences.service';
-import { OccurrenceStatus, OCCURRENCE_STATUS_LABELS } from '../common/enums';
+import { OccurrenceStatus, OCCURRENCE_STATUS_LABELS, Role } from '../common/enums';
+import { Roles } from '../auth/decorators';
 
 @Controller('api/occurrences')
 export class OccurrencesController {
@@ -24,6 +25,8 @@ export class OccurrencesController {
     return this.occurrences.findById(id);
   }
 
+  /** Alterar o status de uma ocorrência exige coordenador ou acima. */
+  @Roles(Role.COORDENADOR)
   @Patch(':id/status')
   updateStatus(
     @Param('id') id: string,

@@ -43,7 +43,7 @@ O conceito define cinco prioridades inegociáveis. Elas guiam cada decisão:
 ## Modelo de dados
 
 ```
-users(id, name, sector, created_at)
+users(id, name, sector, role, password_hash, login, created_at)
 channels(id, key, name, description, created_at)
 transmissions(id, channel_id→channels, user_id→users, priority,
               started_at, duration_ms, audio_path, mime_type,
@@ -120,6 +120,27 @@ responsável informado (detectado no texto), resumo, e status com histórico
 (**Aberto → Em andamento → Resolvido**). Isso cria um histórico institucional
 pesquisável e auditável **sem formulários** — os coordenadores apenas falam.
 
+## Autenticação e autorização (RBAC)
+
+- **Login + senha:** senhas são guardadas com **scrypt** (nativo do Node, sem
+  dependência externa), no formato `salt:hash`. `POST /api/auth/register` e
+  `POST /api/auth/login` retornam um **JWT** assinado (`JWT_SECRET`, validade
+  `JWT_EXPIRES_IN`).
+- **Guarda global (`JwtAuthGuard`):** todas as rotas exigem `Authorization:
+  Bearer <token>`, exceto as marcadas com `@Public()` (registro, login, listas
+  de setores/papéis). O usuário autenticado é injetado em `req.user`.
+- **RBAC (`RolesGuard` + `@Roles()`):** papéis têm hierarquia
+  (`Operador < Coordenador < Direção < Admin`). `@Roles(Role.COORDENADOR)`
+  libera coordenador **e acima**. Exemplos aplicados: alterar status de
+  ocorrência exige *Coordenador+*; listar usuários exige *Direção+*.
+- **WebSocket autenticado:** o token vai no handshake (`auth: { token }`); o
+  `PttGateway` valida na conexão e **vincula a identidade ao socket** — o
+  `identify` usa essa identidade, não confia em `userId` do cliente (evita
+  spoofing de "quem falou").
+- **Papel × setor:** o *setor* diz de onde a pessoa fala; o *papel* diz o que
+  ela pode fazer. No cadastro, o papel é sugerido a partir do setor
+  (`defaultRoleForSector`).
+
 ## Do MVP ao produto — mapeamento
 
 | Camada | MVP | Arquitetura-alvo (conceito) |
@@ -134,7 +155,9 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
 | Transcrição | Web Speech API + stub | Whisper + diarização |
 | IA (resumo/prioridade) | regras determinísticas | LLM |
 | Busca | FTS5 | banco vetorial (semântica) |
-| Criptografia | — (TLS em trânsito) | ponta a ponta |
+| Autenticação | **login+senha (scrypt) + JWT** | + IdP/SSO, refresh tokens |
+| Autorização | **RBAC por papel** | RBAC + políticas finas |
+| Criptografia | JWT + TLS em trânsito | ponta a ponta |
 
 ## Roadmap
 
@@ -145,7 +168,8 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
 - [ ] Resumo/classificação/pesquisa semântica via LLM + banco vetorial.
 - [ ] Presença e arbitragem de canal em Redis (escala horizontal).
 - [ ] Migrar persistência para PostgreSQL e áudio para storage S3.
-- [ ] Autenticação/autorização (papéis) e criptografia ponta a ponta.
+- [x] **Autenticação (login+senha, JWT) e autorização por papel (RBAC).**
+- [ ] Federação de identidade (IdP/SSO) e criptografia ponta a ponta.
 - [ ] App Flutter (segundo plano, mãos-livres, notificações críticas).
 - [ ] Exportação de registros para auditorias e investigações.
 
@@ -161,5 +185,6 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
   25 MB no corpo) — separada do caminho ao vivo. No produto, a própria captura
   do SFU pode alimentar a gravação.
 - **WebRTC exige contexto seguro:** funciona em `localhost` (demo) ou HTTPS.
-- **Sem autenticação forte:** a identificação é por nome+setor, suficiente para
-  o MVP; produção exige IdP e RBAC.
+- **Autenticação por login+senha (JWT) e RBAC** já implementados. Evoluções de
+  produção: IdP/SSO, rotação de segredo, refresh tokens e criptografia ponta a
+  ponta.
