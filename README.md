@@ -86,6 +86,12 @@ Abra **http://localhost:3000** e **entre** com uma credencial demo (aba **Entrar
 
 > 💡 A transcrição ao vivo usa a Web Speech API (melhor no Chrome). Sem microfone? Use o campo **"Sem microfone? Enviar como texto"** — o pipeline de IA, registro e Livro de Ocorrências funciona igualmente.
 
+### Publicar (link HTTPS para testes)
+
+Para colocar no ar com um link HTTPS (via **Render**, com Docker), veja
+**[`DEPLOY.md`](DEPLOY.md)**. Há `Dockerfile` e `render.yaml` prontos. No Render
+a voz ao vivo usa **P2P** (`SFU_ENABLED=false`); para SFU real use Fly.io/VPS.
+
 ### Desenvolvimento (hot reload)
 
 ```bash

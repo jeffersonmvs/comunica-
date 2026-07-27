@@ -33,6 +33,13 @@ export class SfuService implements OnModuleDestroy {
 
   /** Inicializa o worker sob demanda (lazy) e reporta disponibilidade. */
   async init(): Promise<boolean> {
+    // Permite desligar o SFU em ambientes sem UDP (ex.: Render) — o cliente
+    // usa a malha P2P automaticamente quando available=false.
+    if (process.env.SFU_ENABLED === 'false') {
+      this.available = false;
+      this.logger.log('SFU desabilitado (SFU_ENABLED=false) — voz ao vivo via malha P2P.');
+      return false;
+    }
     if (this.worker) return this.available;
     try {
       this.worker = await mediasoup.createWorker({

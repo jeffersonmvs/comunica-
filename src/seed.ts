@@ -14,7 +14,7 @@ import { defaultRoleForSector, Role, Sector, SECTOR_LABELS } from './common/enum
  * Ex.: login "centro_cirurgico" / senha "1234".  Admin: "admin" / "1234".
  */
 async function seed() {
-  const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error'] });
+  const app = await NestFactory.createApplicationContext(AppModule, { logger: ['error', 'warn', 'log'] });
   const logger = new Logger('Seed');
   const users = app.get(UsersService);
   const channels = app.get(ChannelsService);

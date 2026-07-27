@@ -1,0 +1,13 @@
+node_modules
+dist
+data
+public/vendor
+.git
+.gitignore
+*.log
+npm-debug.log*
+.env
+.DS_Store
+.vscode
+.idea
+scripts

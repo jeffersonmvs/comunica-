@@ -21,8 +21,9 @@ async function bootstrap() {
   app.useStaticAssets(path.join(process.cwd(), 'public'));
 
   const port = parseInt(process.env.PORT || '3000', 10);
-  await app.listen(port);
-  new Logger('Bootstrap').log(`COMUNICA+ no ar em http://localhost:${port}`);
+  // Bind em 0.0.0.0 para funcionar em containers (Render/Docker).
+  await app.listen(port, '0.0.0.0');
+  new Logger('Bootstrap').log(`COMUNICA+ no ar na porta ${port}`);
 }
 
 bootstrap();
