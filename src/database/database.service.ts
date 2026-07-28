@@ -19,6 +19,24 @@ export class DatabaseService implements OnModuleDestroy {
     this._db = new Database(dbPath);
     this._db.pragma('journal_mode = WAL');
     this._db.exec(SCHEMA_SQL);
+    this.migrate();
+  }
+
+  /** Migrações idempotentes para bancos criados antes de novas colunas. */
+  private migrate(): void {
+    const cols = (this._db.prepare(`PRAGMA table_info(users)`).all() as Array<{ name: string }>).map(
+      (c) => c.name,
+    );
+    if (!cols.includes('role')) {
+      this._db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'operador'`);
+    }
+    if (!cols.includes('password_hash')) {
+      this._db.exec(`ALTER TABLE users ADD COLUMN password_hash TEXT`);
+    }
+    if (!cols.includes('login')) {
+      this._db.exec(`ALTER TABLE users ADD COLUMN login TEXT`);
+      this._db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login ON users(login)`);
+    }
   }
 
   get db(): Database.Database {

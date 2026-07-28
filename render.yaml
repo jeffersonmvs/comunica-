@@ -1,0 +1,26 @@
+# Blueprint do Render para o COMUNICA+ (Docker Web Service).
+# Deploy: no Render, "New +" → "Blueprint" → aponte para este repositório.
+# O Render injeta PORT automaticamente; o app o utiliza.
+services:
+  - type: web
+    name: comunica-plus
+    runtime: docker
+    plan: free
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      # O Render não expõe UDP → SFU desligado; a voz ao vivo usa malha P2P.
+      - key: SFU_ENABLED
+        value: "false"
+      # Segredo do JWT gerado automaticamente e mantido entre deploys.
+      - key: JWT_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: "12h"
+    # Plano free usa disco efêmero: o banco/áudios são recriados a cada
+    # reinício e os usuários demo são repopulados no boot (start:prod).
+    # Para persistir, use um plano pago e habilite o disco abaixo:
+    # disk:
+    #   name: comunica-data
+    #   mountPath: /app/data
+    #   sizeGB: 1

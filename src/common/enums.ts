@@ -89,8 +89,57 @@ export enum ReceiptType {
   ESCUTADO = 'escutado',
 }
 
+/**
+ * Papel de acesso (RBAC), independente do setor. O setor diz "de onde a pessoa
+ * fala"; o papel diz "o que ela pode fazer" no sistema.
+ */
+export enum Role {
+  ADMIN = 'admin', // administração do sistema (gestão de usuários)
+  DIRETOR = 'diretor', // direção — acesso operacional total
+  COORDENADOR = 'coordenador', // coordenadores de setor
+  OPERADOR = 'operador', // demais operacionais
+}
+
+export const ROLE_LABELS: Record<Role, string> = {
+  [Role.ADMIN]: 'Administrador',
+  [Role.DIRETOR]: 'Direção',
+  [Role.COORDENADOR]: 'Coordenador',
+  [Role.OPERADOR]: 'Operador',
+};
+
+/** Hierarquia de papéis (maior = mais privilégios). */
+export const ROLE_RANK: Record<Role, number> = {
+  [Role.OPERADOR]: 0,
+  [Role.COORDENADOR]: 1,
+  [Role.DIRETOR]: 2,
+  [Role.ADMIN]: 3,
+};
+
+/** Papel padrão sugerido para cada setor no cadastro. */
+export function defaultRoleForSector(sector: Sector): Role {
+  switch (sector) {
+    case Sector.DIRETOR_GERAL:
+    case Sector.DIRETOR_CLINICO:
+    case Sector.DIRETOR_TECNICO:
+      return Role.DIRETOR;
+    case Sector.EMERGENCIA:
+    case Sector.CENTRO_CIRURGICO:
+    case Sector.UTI:
+    case Sector.ENFERMAGEM:
+    case Sector.OBSTETRICIA:
+    case Sector.PEDIATRIA:
+      return Role.COORDENADOR;
+    default:
+      return Role.OPERADOR;
+  }
+}
+
 export function isSector(value: string): value is Sector {
   return (Object.values(Sector) as string[]).includes(value);
+}
+
+export function isRole(value: string): value is Role {
+  return (Object.values(Role) as string[]).includes(value);
 }
 
 export function isPriority(value: string): value is Priority {

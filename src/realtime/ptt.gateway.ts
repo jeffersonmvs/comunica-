@@ -11,6 +11,8 @@ import { Logger } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { UsersService } from '../users/users.service';
 import { TransmissionsService } from '../transmissions/transmissions.service';
+import { AuthService } from '../auth/auth.service';
+import { SfuService } from '../sfu/sfu.service';
 import { isPriority, Priority, PRIORITY_WEIGHT, Sector, SECTOR_LABELS } from '../common/enums';
 
 interface Presence {
@@ -47,13 +49,36 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
   constructor(
     private readonly users: UsersService,
     private readonly transmissions: TransmissionsService,
+    private readonly auth: AuthService,
+    private readonly sfu: SfuService,
   ) {}
 
   handleConnection(client: Socket): void {
-    this.logger.log(`Conexão: ${client.id}`);
+    // Autenticação obrigatória via token no handshake (auth: { token }).
+    const token: string | undefined =
+      client.handshake?.auth?.token || (client.handshake?.query?.token as string | undefined);
+    if (!token) {
+      this.logger.warn(`Conexão sem token recusada: ${client.id}`);
+      client.emit('unauthorized', { reason: 'Token ausente.' });
+      client.disconnect(true);
+      return;
+    }
+    try {
+      const payload = this.auth.verify(token);
+      const user = this.users.findById(payload.sub);
+      if (!user) throw new Error('usuário inexistente');
+      // Vincula a identidade autenticada ao socket (não confia em dados do cliente).
+      client.data.userId = user.id;
+      this.logger.log(`Conexão autenticada: ${client.id} (${user.name})`);
+    } catch {
+      this.logger.warn(`Token inválido, conexão recusada: ${client.id}`);
+      client.emit('unauthorized', { reason: 'Token inválido ou expirado.' });
+      client.disconnect(true);
+    }
   }
 
   handleDisconnect(client: Socket): void {
+    this.sfu.cleanupSocket(client.id);
     const p = this.presence.get(client.id);
     this.presence.delete(client.id);
     // Libera o canal se este socket estava transmitindo.
@@ -68,9 +93,11 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
   }
 
   @SubscribeMessage('identify')
-  onIdentify(@ConnectedSocket() client: Socket, @MessageBody() body: { userId: string }) {
-    const user = this.users.findById(body?.userId);
-    if (!user) return { ok: false, error: 'Usuário não encontrado.' };
+  onIdentify(@ConnectedSocket() client: Socket) {
+    // Usa a identidade autenticada no handshake — ignora qualquer userId do cliente.
+    const userId: string | undefined = client.data?.userId;
+    const user = userId ? this.users.findById(userId) : null;
+    if (!user) return { ok: false, error: 'Sessão não autenticada.' };
     this.presence.set(client.id, {
       socketId: client.id,
       userId: user.id,
@@ -143,8 +170,10 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
       sector: p.sector,
       sectorLabel: SECTOR_LABELS[p.sector],
       priority,
+      // socket do falante: os ouvintes usam para abrir a conexão WebRTC ao vivo.
+      speakerSocketId: client.id,
     });
-    return { ok: true, startedAt: active.startedAt };
+    return { ok: true, startedAt: active.startedAt, socketId: client.id };
   }
 
   @SubscribeMessage('ptt_cancel')
@@ -153,6 +182,7 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
     const active = channelId ? this.activeByChannel.get(channelId) : undefined;
     if (active && active.socketId === client.id) {
       this.activeByChannel.delete(channelId);
+      this.sfu.closeProducersOfSocket(client.id);
       this.server.emit('ptt_ended', { channelId });
     }
     return { ok: true };
@@ -179,6 +209,8 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
     // Libera o canal.
     const active = this.activeByChannel.get(channelId);
     if (active?.socketId === client.id) this.activeByChannel.delete(channelId);
+    // Encerra o fluxo SFU do falante (ouvintes recebem 'producerclose').
+    this.sfu.closeProducersOfSocket(client.id);
     this.server.emit('ptt_ended', { channelId });
 
     try {
@@ -198,6 +230,141 @@ export class PttGateway implements OnGatewayConnection, OnGatewayDisconnect {
     } catch (err) {
       this.logger.error(`Falha ao registrar transmissão: ${(err as Error).message}`);
       return { ok: false, error: 'Falha ao registrar a transmissão.' };
+    }
+  }
+
+  // ---------------------------------------------------------------------- //
+  // Sinalização WebRTC (voz ao vivo). O servidor atua apenas como signaling
+  // server: encaminha offer/answer/ICE entre pares (malha P2P por canal). A
+  // mídia trafega direto entre navegadores — latência típica < 300 ms.
+  // ---------------------------------------------------------------------- //
+
+  /** Ouvinte anuncia-se ao falante para receber o áudio ao vivo. */
+  @SubscribeMessage('webrtc_join')
+  onWebrtcJoin(@ConnectedSocket() client: Socket, @MessageBody() body: { to: string }) {
+    this.relay('webrtc_join', client, body?.to, {});
+  }
+
+  @SubscribeMessage('webrtc_offer')
+  onWebrtcOffer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { to: string; sdp: unknown },
+  ) {
+    this.relay('webrtc_offer', client, body?.to, { sdp: body?.sdp });
+  }
+
+  @SubscribeMessage('webrtc_answer')
+  onWebrtcAnswer(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { to: string; sdp: unknown },
+  ) {
+    this.relay('webrtc_answer', client, body?.to, { sdp: body?.sdp });
+  }
+
+  @SubscribeMessage('webrtc_ice')
+  onWebrtcIce(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { to: string; candidate: unknown },
+  ) {
+    this.relay('webrtc_ice', client, body?.to, { candidate: body?.candidate });
+  }
+
+  /** Encaminha um evento de sinalização a um socket específico, anexando o remetente. */
+  private relay(event: string, from: Socket, to: string, payload: Record<string, unknown>) {
+    if (!to) return { ok: false };
+    this.server.to(to).emit(event, { from: from.id, ...payload });
+    return { ok: true };
+  }
+
+  // ---------------------------------------------------------------------- //
+  // Sinalização SFU (mediasoup). Topologia em estrela: o falante publica UM
+  // fluxo (produce) e o servidor encaminha a cada ouvinte (consume) — escala
+  // para muitos ouvintes por canal. Se o SFU estiver indisponível, o cliente
+  // usa a malha P2P acima como fallback.
+  // ---------------------------------------------------------------------- //
+
+  /** Capacidades RTP do canal + disponibilidade do SFU. */
+  @SubscribeMessage('sfu_capabilities')
+  async onSfuCapabilities(@MessageBody() body: { channelId: string }) {
+    if (!this.sfu.isAvailable() || !body?.channelId) return { available: false };
+    try {
+      const rtpCapabilities = await this.sfu.getRtpCapabilities(body.channelId);
+      const producers = this.sfu.producersOfChannel(body.channelId);
+      return { available: true, rtpCapabilities, producers };
+    } catch {
+      return { available: false };
+    }
+  }
+
+  @SubscribeMessage('sfu_create_transport')
+  async onSfuCreateTransport(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { channelId: string },
+  ) {
+    try {
+      const params = await this.sfu.createTransport(body.channelId, client.id);
+      return { ok: true, params };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_connect_transport')
+  async onSfuConnectTransport(@MessageBody() body: { transportId: string; dtlsParameters: any }) {
+    try {
+      await this.sfu.connectTransport(body.transportId, body.dtlsParameters);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_produce')
+  async onSfuProduce(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() body: { channelId: string; transportId: string; kind: any; rtpParameters: any },
+  ) {
+    try {
+      const id = await this.sfu.produce(body.transportId, body.kind, body.rtpParameters, client.id);
+      // Avisa os ouvintes do canal que há um novo fluxo para consumir.
+      client.to(this.room(body.channelId)).emit('sfu_new_producer', {
+        channelId: body.channelId,
+        producerId: id,
+        speakerSocketId: client.id,
+      });
+      return { ok: true, id };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_consume')
+  async onSfuConsume(
+    @ConnectedSocket() client: Socket,
+    @MessageBody()
+    body: { channelId: string; transportId: string; producerId: string; rtpCapabilities: any },
+  ) {
+    try {
+      const params = await this.sfu.consume(
+        body.channelId,
+        body.transportId,
+        body.producerId,
+        body.rtpCapabilities,
+        client.id,
+      );
+      return { ok: true, params };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  @SubscribeMessage('sfu_resume')
+  async onSfuResume(@MessageBody() body: { consumerId: string }) {
+    try {
+      await this.sfu.resumeConsumer(body.consumerId);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: (err as Error).message };
     }
   }
 

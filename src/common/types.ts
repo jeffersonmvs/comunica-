@@ -1,9 +1,10 @@
-import { OccurrenceStatus, Priority, ReceiptType, Sector } from './enums';
+import { OccurrenceStatus, Priority, ReceiptType, Role, Sector } from './enums';
 
 export interface User {
   id: string;
   name: string;
   sector: Sector;
+  role: Role;
   createdAt: string;
 }
 

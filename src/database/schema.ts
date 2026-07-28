@@ -11,10 +11,13 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS users (
-  id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL,
-  sector      TEXT NOT NULL,
-  created_at  TEXT NOT NULL
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL,
+  sector        TEXT NOT NULL,
+  role          TEXT NOT NULL DEFAULT 'operador',
+  password_hash TEXT,
+  login         TEXT UNIQUE,
+  created_at    TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS channels (

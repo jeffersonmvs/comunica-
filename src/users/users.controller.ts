@@ -1,17 +1,28 @@
-import { Body, Controller, Get, Param, NotFoundException, Post } from '@nestjs/common';
+import { Controller, Get, Param, NotFoundException } from '@nestjs/common';
 import { UsersService } from './users.service';
-import { Sector, SECTOR_LABELS } from '../common/enums';
+import { Role, ROLE_LABELS, Sector, SECTOR_LABELS } from '../common/enums';
+import { Public, Roles } from '../auth/decorators';
 
 @Controller('api/users')
 export class UsersController {
   constructor(private readonly users: UsersService) {}
 
-  /** Lista os setores disponíveis (público-alvo do sistema). */
+  /** Setores disponíveis (público-alvo do sistema). Público (tela de cadastro). */
+  @Public()
   @Get('sectors')
   sectors() {
     return Object.values(Sector).map((key) => ({ key, label: SECTOR_LABELS[key] }));
   }
 
+  /** Papéis de acesso (RBAC). Público (tela de cadastro). */
+  @Public()
+  @Get('roles')
+  roles() {
+    return Object.values(Role).map((key) => ({ key, label: ROLE_LABELS[key] }));
+  }
+
+  /** Lista de usuários — restrita à direção/administração. */
+  @Roles(Role.DIRETOR)
   @Get()
   list() {
     return this.users.list();
@@ -22,10 +33,5 @@ export class UsersController {
     const user = this.users.findById(id);
     if (!user) throw new NotFoundException('Usuário não encontrado.');
     return user;
-  }
-
-  @Post()
-  create(@Body() body: { name: string; sector: string }) {
-    return this.users.create(body?.name, body?.sector);
   }
 }
