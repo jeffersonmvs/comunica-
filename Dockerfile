@@ -7,12 +7,17 @@
 FROM node:20-bookworm-slim AS build
 WORKDIR /app
 
-# Toolchain para compilar módulos nativos (better-sqlite3 / mediasoup worker).
+# Toolchain para compilar módulos nativos:
+#  - better-sqlite3: node-gyp (python3, make, g++)
+#  - mediasoup worker: build via meson/ninja, que o postinstall instala com
+#    `python3 -m pip install invoke` → exige python3-pip (senão `npm ci` falha).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+  && apt-get install -y --no-install-recommends \
+       python3 python3-pip pkg-config make g++ ca-certificates \
   && rm -rf /var/lib/apt/lists/*
 
-# Instala dependências (com devDeps para compilar).
+# Instala dependências (com devDeps para compilar). O postinstall do mediasoup
+# compila o worker nativo a partir do código-fonte (usa python3/pip + g++).
 COPY package.json package-lock.json ./
 RUN npm ci
 
