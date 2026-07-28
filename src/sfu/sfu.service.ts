@@ -1,6 +1,4 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
-import * as mediasoup from 'mediasoup';
-import type { Router, WebRtcTransport, Producer, Consumer, Worker } from 'mediasoup/node/lib/types';
 
 /**
  * Camada SFU (Selective Forwarding Unit) baseada em mediasoup.
@@ -10,24 +8,28 @@ import type { Router, WebRtcTransport, Producer, Consumer, Worker } from 'medias
  * cada ouvinte (Consumers). Assim o falante não precisa de N conexões — escala
  * para dezenas de ouvintes por canal.
  *
- * Se o worker nativo do mediasoup não iniciar (ambiente sem suporte), o serviço
- * marca `available=false` e o cliente cai automaticamente para a malha P2P.
+ * O `mediasoup` é uma dependência OPCIONAL (compila um worker nativo pesado).
+ * Ele é carregado por `import()` dinâmico só quando o SFU está habilitado; se
+ * não estiver instalado (ex.: build enxuto do Render) ou o worker não iniciar,
+ * `available=false` e o cliente cai automaticamente para a malha P2P.
+ * Os tipos do mediasoup são referenciados como `any` para não exigir o pacote
+ * em tempo de compilação.
  */
 @Injectable()
 export class SfuService implements OnModuleDestroy {
   private readonly logger = new Logger('SfuService');
-  private worker: Worker | null = null;
+  private worker: any = null;
   private available = false;
 
-  private readonly routers = new Map<string, Router>(); // channelId -> Router
-  private readonly transports = new Map<string, { transport: WebRtcTransport; socketId: string; channelId: string }>();
-  private readonly producers = new Map<string, { producer: Producer; socketId: string; channelId: string }>();
-  private readonly consumers = new Map<string, { consumer: Consumer; socketId: string }>();
+  private readonly routers = new Map<string, any>(); // channelId -> Router
+  private readonly transports = new Map<string, { transport: any; socketId: string; channelId: string }>();
+  private readonly producers = new Map<string, { producer: any; socketId: string; channelId: string }>();
+  private readonly consumers = new Map<string, { consumer: any; socketId: string }>();
 
   private readonly listenIp = process.env.SFU_LISTEN_IP || '127.0.0.1';
   private readonly announcedIp = process.env.SFU_ANNOUNCED_IP || undefined;
 
-  private static readonly AUDIO_CODECS: mediasoup.types.RtpCodecCapability[] = [
+  private static readonly AUDIO_CODECS: any[] = [
     { kind: 'audio', mimeType: 'audio/opus', preferredPayloadType: 111, clockRate: 48000, channels: 2 },
   ];
 
@@ -42,6 +44,11 @@ export class SfuService implements OnModuleDestroy {
     }
     if (this.worker) return this.available;
     try {
+      // import() dinâmico via especificador indireto: o pacote nativo (opcional)
+      // só é carregado quando o SFU está ligado, e o tsc não exige o módulo em
+      // tempo de compilação (build enxuto do Render funciona sem ele instalado).
+      const moduleName = 'mediasoup';
+      const mediasoup: any = await import(moduleName);
       this.worker = await mediasoup.createWorker({
         rtcMinPort: Number(process.env.SFU_MIN_PORT || 40000),
         rtcMaxPort: Number(process.env.SFU_MAX_PORT || 40100),
@@ -65,7 +72,7 @@ export class SfuService implements OnModuleDestroy {
     return this.available && !!this.worker;
   }
 
-  private async getRouter(channelId: string): Promise<Router> {
+  private async getRouter(channelId: string): Promise<any> {
     let router = this.routers.get(channelId);
     if (router && !router.closed) return router;
     if (!this.worker) throw new Error('SFU indisponível.');
@@ -74,7 +81,7 @@ export class SfuService implements OnModuleDestroy {
     return router;
   }
 
-  async getRtpCapabilities(channelId: string): Promise<mediasoup.types.RtpCapabilities> {
+  async getRtpCapabilities(channelId: string): Promise<any> {
     const router = await this.getRouter(channelId);
     return router.rtpCapabilities;
   }
@@ -100,7 +107,7 @@ export class SfuService implements OnModuleDestroy {
     };
   }
 
-  async connectTransport(transportId: string, dtlsParameters: mediasoup.types.DtlsParameters): Promise<void> {
+  async connectTransport(transportId: string, dtlsParameters: any): Promise<void> {
     const entry = this.transports.get(transportId);
     if (!entry) throw new Error('Transport não encontrado.');
     await entry.transport.connect({ dtlsParameters });
@@ -109,8 +116,8 @@ export class SfuService implements OnModuleDestroy {
   /** Falante publica a faixa de áudio. Retorna o id do Producer. */
   async produce(
     transportId: string,
-    kind: mediasoup.types.MediaKind,
-    rtpParameters: mediasoup.types.RtpParameters,
+    kind: any,
+    rtpParameters: any,
     socketId: string,
   ): Promise<string> {
     const entry = this.transports.get(transportId);
@@ -125,7 +132,7 @@ export class SfuService implements OnModuleDestroy {
     channelId: string,
     transportId: string,
     producerId: string,
-    rtpCapabilities: mediasoup.types.RtpCapabilities,
+    rtpCapabilities: any,
     socketId: string,
   ) {
     const router = await this.getRouter(channelId);
