@@ -4,7 +4,7 @@
 # Inclui as dependências nativas: better-sqlite3 e mediasoup.
 # ---------------------------------------------------------------------------
 
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
 # Toolchain para compilar módulos nativos:
@@ -29,7 +29,7 @@ RUN npm run build
 RUN npm prune --omit=dev
 
 # ---------------------------------------------------------------------------
-FROM node:20-bookworm-slim AS runtime
+FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
