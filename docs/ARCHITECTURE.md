@@ -212,6 +212,10 @@ pesquisável e auditável **sem formulários** — os coordenadores apenas falam
 - **Voz ao vivo via SFU (mediasoup), 1 worker/router por canal:** ótimo para o
   MVP; produção com muitos canais/instâncias pede pool de workers e cluster.
   Fallback P2P (malha) cobre ambientes sem o worker nativo.
+- **`mediasoup` é dependência OPCIONAL:** compila um worker nativo pesado, então
+  é carregado por `import()` dinâmico só quando o SFU está ligado. Builds sem UDP
+  (ex.: Render) omitem o pacote (`npm ci --omit=optional`) → build leve e a voz
+  ao vivo via P2P. Para SFU real: `docker build --build-arg WITH_SFU=1`.
 - **SFU exige rede:** fora de `localhost`, defina `SFU_ANNOUNCED_IP` (IP público)
   e libere a faixa UDP `SFU_MIN_PORT`–`SFU_MAX_PORT`.
 - **A gravação (registro permanente) trafega em base64 no `ptt_end`** (limite de

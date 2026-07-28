@@ -57,6 +57,21 @@ Abra a URL em **duas abas** (ou dois dispositivos) com usuários diferentes,
 entre no **mesmo canal** e **segure para falar** em um deles — o outro ouve.
 No Render a mídia vai por **P2P** (WebRTC direto entre navegadores).
 
+## Build enxuto (sem compilar o SFU)
+
+No Render o SFU não é usado (sem UDP), então a imagem **não compila o worker
+nativo do mediasoup**: ele é uma dependência **opcional**, e o `Dockerfile`
+instala com `npm ci --omit=optional` por padrão. Resultado: build rápido e
+confiável, sem o passo pesado de compilação C++. Em runtime, a voz ao vivo cai
+para **P2P** automaticamente.
+
+Para uma imagem **com SFU real** (Fly.io/VPS, onde há UDP), construa com o build
+arg `WITH_SFU=1` — aí o mediasoup é instalado e o worker é compilado:
+
+```bash
+docker build --build-arg WITH_SFU=1 -t comunica-plus:sfu .
+```
+
 ## Observações
 
 - **Disco efêmero (plano free):** o banco SQLite e os áudios são recriados a
